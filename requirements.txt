@@ -1,0 +1,10 @@
+fastapi>=0.104
+uvicorn[standard]>=0.24
+playwright>=1.40
+aiohttp>=3.9
+aiosqlite>=0.19
+pydantic>=2.5
+python-multipart>=0.0.6
+Pillow>=10.0
+requests>=2.31
+urllib3>=2.0

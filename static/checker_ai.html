@@ -1,0 +1,1381 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Form Checker</title>
+  <style>
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      --bg: #0f1117;
+      --panel: #1a1d27;
+      --card: #22263a;
+      --border: #2e3350;
+      --accent: #4f8ef7;
+      --purple: #7c3aed;
+      --green: #22c55e;
+      --yellow: #eab308;
+      --red: #ef4444;
+      --orange: #f97316;
+      --muted: #8892b0;
+      --text: #e2e8f0;
+      --radius: 8px;
+    }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── Header ── */
+    .header {
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      padding: 11px 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    .header h1 {
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    .header .ai-badge {
+      background: linear-gradient(90deg, var(--purple), var(--accent));
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 20px;
+      letter-spacing: .05em;
+    }
+
+    .header .sub {
+      font-size: 12px;
+      color: var(--muted);
+      margin-left: auto;
+    }
+
+    /* ── Layout ── */
+    .layout {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: 360px;
+      min-width: 300px;
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    .sidebar-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .sidebar-tab {
+      flex: 1;
+      padding: 10px;
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-size: 13px;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all .15s;
+    }
+
+    .sidebar-tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+      background: rgba(79, 142, 247, .06);
+    }
+
+    .tab-pane {
+      display: none;
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px;
+    }
+
+    .tab-pane.active {
+      display: flex;
+      flex-direction: column;
+      gap: 11px;
+    }
+
+    /* ── Controls ── */
+    label {
+      font-size: 11px;
+      color: var(--muted);
+      display: block;
+      margin-bottom: 3px;
+    }
+
+    input[type="text"],
+    input[type="tel"],
+    input[type="email"],
+    input[type="password"],
+    textarea,
+    select {
+      width: 100%;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-size: 13px;
+      padding: 7px 10px;
+      outline: none;
+      transition: border-color .15s;
+      font-family: inherit;
+    }
+
+    input:focus,
+    textarea:focus,
+    select:focus {
+      border-color: var(--accent);
+    }
+
+    textarea {
+      resize: vertical;
+    }
+
+    .form-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    .form-row>* {
+      flex: 1;
+    }
+
+    .btn {
+      padding: 8px 16px;
+      border-radius: var(--radius);
+      border: none;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity .15s, transform .05s;
+      white-space: nowrap;
+    }
+
+    .btn:active {
+      transform: scale(.97);
+    }
+
+    .btn:disabled {
+      opacity: .45;
+      cursor: not-allowed;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn-danger {
+      background: var(--red);
+      color: #fff;
+    }
+
+    .btn-ghost {
+      background: var(--card);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn-sm {
+      padding: 5px 10px;
+      font-size: 12px;
+    }
+
+    .btn-full {
+      width: 100%;
+    }
+
+    .file-drop {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 9px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+      cursor: pointer;
+      transition: border-color .15s;
+    }
+
+    .file-drop:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .file-drop input {
+      display: none;
+    }
+
+    .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 2px 0;
+    }
+
+    /* ── Sessions ── */
+    .session-item {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 9px 12px;
+      cursor: pointer;
+      transition: border-color .15s;
+    }
+
+    .session-item:hover {
+      border-color: var(--accent);
+    }
+
+    .session-item.active {
+      border-color: var(--accent);
+      background: rgba(79, 142, 247, .08);
+    }
+
+    .s-name {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .s-meta {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    .session-badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .badge-running {
+      background: rgba(234, 179, 8, .15);
+      color: var(--yellow);
+    }
+
+    .badge-done {
+      background: rgba(34, 197, 94, .12);
+      color: var(--green);
+    }
+
+    /* ── Main ── */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ── Progress ── */
+    .progress-area {
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 18px;
+      flex-shrink: 0;
+    }
+
+    .progress-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .progress-title {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .stats {
+      display: flex;
+      gap: 18px;
+    }
+
+    .stat {
+      text-align: center;
+    }
+
+    .stat .num {
+      font-size: 20px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .stat .lbl {
+      font-size: 10px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    .stat.blue .num {
+      color: var(--accent);
+    }
+
+    .stat.green .num {
+      color: var(--green);
+    }
+
+    .stat.orange .num {
+      color: var(--orange);
+    }
+
+    .stat.red .num {
+      color: var(--red);
+    }
+
+    .stat.purple .num {
+      color: #a78bfa;
+    }
+
+    .stat.muted .num {
+      color: var(--muted);
+    }
+
+    .progress-bar-wrap {
+      background: var(--card);
+      border-radius: 6px;
+      height: 7px;
+      overflow: hidden;
+    }
+
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--purple));
+      border-radius: 6px;
+      width: 0;
+      transition: width .3s;
+    }
+
+    /* ── Token counter ── */
+    .token-counter {
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .token-counter span {
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    /* ── Toolbar ── */
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 9px 16px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+
+    .filter-btn {
+      padding: 3px 9px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      font-size: 12px;
+      cursor: pointer;
+      transition: all .15s;
+    }
+
+    .filter-btn.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: rgba(79, 142, 247, .1);
+    }
+
+    .toolbar-right {
+      margin-left: auto;
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+
+    /* ── Results table ── */
+    .results-wrap {
+      flex: 1;
+      overflow-y: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    thead th {
+      position: sticky;
+      top: 0;
+      background: var(--panel);
+      padding: 9px 11px;
+      text-align: left;
+      font-weight: 600;
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      border-bottom: 1px solid var(--border);
+      z-index: 1;
+    }
+
+    tbody tr {
+      border-bottom: 1px solid rgba(46, 51, 80, .5);
+      transition: background .1s;
+    }
+
+    tbody tr:hover {
+      background: rgba(255, 255, 255, .03);
+    }
+
+    tbody tr.row-new {
+      animation: fadeIn .35s ease;
+    }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(-3px);
+      }
+
+      to {
+        opacity: 1;
+      }
+    }
+
+    td {
+      padding: 8px 11px;
+      vertical-align: middle;
+    }
+
+    .td-url {
+      max-width: 260px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: monospace;
+      font-size: 12px;
+    }
+
+    .td-url a {
+      color: var(--text);
+      text-decoration: none;
+    }
+
+    .td-url a:hover {
+      color: var(--accent);
+      text-decoration: underline;
+    }
+
+    /* Status badges */
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      padding: 3px 7px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .s-success {
+      background: rgba(34, 197, 94, .15);
+      color: #4ade80;
+    }
+
+    .s-cached_profile {
+      background: rgba(34, 197, 94, .1);
+      color: #86efac;
+    }
+
+    .s-calltouch_api {
+      background: rgba(79, 142, 247, .15);
+      color: #93c5fd;
+    }
+
+    .s-captcha {
+      background: rgba(234, 179, 8, .15);
+      color: #fbbf24;
+    }
+
+    .s-uncertain {
+      background: rgba(251, 191, 36, .15);
+      color: #fcd34d;
+    }
+
+    .s-no_form {
+      background: rgba(139, 148, 177, .12);
+      color: var(--muted);
+    }
+
+    .s-no_ai_key {
+      background: rgba(249, 115, 22, .15);
+      color: #fb923c;
+    }
+
+    .s-ai_error {
+      background: rgba(249, 115, 22, .15);
+      color: #fb923c;
+    }
+
+    .s-site_error {
+      background: rgba(239, 68, 68, .15);
+      color: #f87171;
+    }
+
+    .s-failed {
+      background: rgba(239, 68, 68, .1);
+      color: #fca5a5;
+    }
+
+    .method-tag {
+      font-size: 11px;
+      color: var(--muted);
+      background: var(--card);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    .profile-tag {
+      font-size: 10px;
+      color: #86efac;
+      background: rgba(34, 197, 94, .1);
+      padding: 1px 5px;
+      border-radius: 4px;
+      margin-left: 3px;
+    }
+
+    .vision-tag {
+      font-size: 10px;
+      color: #a78bfa;
+      background: rgba(139, 92, 246, .12);
+      padding: 1px 5px;
+      border-radius: 4px;
+      margin-left: 3px;
+    }
+
+    .tokens-tag {
+      font-size: 10px;
+      color: var(--muted);
+    }
+
+    .td-msg {
+      font-size: 12px;
+      color: var(--muted);
+      max-width: 300px;
+    }
+
+    .expand-btn {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 2px 6px;
+      font-size: 11px;
+      transition: all .15s;
+    }
+
+    .expand-btn:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .detail-row td {
+      padding: 0;
+      background: rgba(79, 142, 247, .04);
+    }
+
+    .detail-inner {
+      padding: 8px 12px 10px 44px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .detail-inner b {
+      color: var(--text);
+    }
+
+    /* ── Empty ── */
+    .empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      gap: 10px;
+      color: var(--muted);
+    }
+
+    .empty svg {
+      opacity: .3;
+    }
+
+    .empty p {
+      font-size: 14px;
+    }
+
+    /* ── Info block ── */
+    .info-block {
+      background: rgba(79, 142, 247, .07);
+      border: 1px solid rgba(79, 142, 247, .2);
+      border-radius: var(--radius);
+      padding: 8px 12px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .info-block b {
+      color: var(--text);
+    }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar {
+      width: 5px;
+      height: 5px;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
+    }
+
+    /* ── Toast ── */
+    .toast {
+      position: fixed;
+      bottom: 18px;
+      right: 18px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 9px 15px;
+      font-size: 13px;
+      z-index: 1000;
+      animation: slideUp .2s ease;
+    }
+
+    @keyframes slideUp {
+      from {
+        transform: translateY(16px);
+        opacity: 0;
+      }
+
+      to {
+        opacity: 1;
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="header">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+      style="color:var(--accent)">
+      <path d="M12 2a10 10 0 1 0 10 10" />
+      <path d="M12 6v6l4 2" />
+      <path d="M18 2v4h4" />
+    </svg>
+    <h1>AI Form Checker</h1>
+    <span class="ai-badge">DeepSeek</span>
+    <span class="ai-badge" style="background:linear-gradient(90deg,#7c3aed,#a78bfa);margin-left:3px">+ Vision</span>
+    <span class="sub" id="profilesInfo">Загрузка...</span>
+  </div>
+
+  <div class="layout">
+
+    <!-- ── Sidebar ── -->
+    <div class="sidebar">
+      <div class="sidebar-tabs">
+        <button class="sidebar-tab active" onclick="showTab('tab-new',this)">Новая проверка</button>
+        <button class="sidebar-tab" onclick="showTab('tab-history',this)">История</button>
+        <button class="sidebar-tab" onclick="showTab('tab-cache',this);loadProfiles()">Кэш</button>
+      </div>
+
+      <!-- Tab: New -->
+      <div id="tab-new" class="tab-pane active">
+
+        <div>
+          <label>Название сессии</label>
+          <input type="text" id="sessionName" value="Проверка" placeholder="Название для истории">
+        </div>
+
+        <div>
+          <label>Список сайтов <span id="urlCount" style="color:var(--accent)"></span></label>
+          <textarea id="urlsInput" rows="7"
+            placeholder="https://clinic.ru&#10;https://stomatology.ru&#10;clinic2.ru&#10;..."
+            oninput="countUrls()"></textarea>
+        </div>
+
+        <div class="file-drop" onclick="document.getElementById('fileInput').click()">
+          <input type="file" id="fileInput" accept=".txt,.csv" onchange="loadFile(this)">
+          Загрузить .txt / .csv
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="form-row">
+          <div>
+            <label>Фамилия (тест)</label>
+            <input type="text" id="testLastName" value="Петров">
+          </div>
+          <div>
+            <label>Имя (тест)</label>
+            <input type="text" id="testFirstName" value="Иван">
+          </div>
+          <div>
+            <label>Отчество (тест)</label>
+            <input type="text" id="testPatronymic" value="Алексеевич">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div>
+            <label>Телефон (тест)</label>
+            <input type="tel" id="testPhone" value="+79332181324">
+          </div>
+          <div>
+            <label>Email (тест)</label>
+            <input type="email" id="testEmail" value="analginawb@inbox.ru">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div>
+            <label>Комментарий</label>
+            <input type="text" id="testComment" value="нужны виниры, жду звонка, спасибо!">
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div>
+          <label>Claude API ключ <span style="color:var(--muted);font-size:10px">(необязательно — AI fallback если эвристика не справилась)</span></label>
+          <input type="password" id="claudeKey" placeholder="sk-... (optional)" value="sk-aafa6bc8d83bafadc787a7af79ba1608159a4fd53e1b8c2fc23f16cbe10def49">
+        </div>
+
+        <div>
+          <label>RuCaptcha API ключ <span style="color:var(--muted);font-size:10px">(необязательно — для автоматического
+              решения капчи)</span></label>
+          <input type="password" id="rucaptchaKey" placeholder="5309e80a..." value="5309e80aa7e2b3a2aed4b18f9ace53d6">
+        </div>
+
+        <div class="info-block">
+          <b>Как работает:</b> если задан DeepSeek ключ, используется AI-анализ HTML формы; если ключ пустой —
+          включается локальная эвристика селекторов.
+          Если задан OpenAI ключ — дополнительно делается скриншот формы и gpt-4o визуально проверяет/уточняет поля.
+          После первого успеха профиль сохраняется, повторные запуски идут быстрее. Капча решается через RuCaptcha (если
+          ключ указан).
+        </div>
+
+        <div>
+          <label>Прокси <span style="color:var(--muted);font-size:10px">(необязательно, по одному на строку: host:port
+              или host:port:user:pass)</span></label>
+          <textarea id="proxiesInput" rows="2" placeholder=""></textarea>
+        </div>
+
+        <div class="form-row">
+          <div>
+            <label>Макс. попыток на домен</label>
+            <input type="number" id="maxAttempts" min="1" max="6" value="3">
+          </div>
+          <div>
+            <label>Таймаут домена (сек)</label>
+            <input type="number" id="domainTimeoutSec" min="30" max="1200" value="240">
+          </div>
+          <div style="display:flex;align-items:flex-end">
+            <label style="display:flex;gap:6px;align-items:center;cursor:pointer;margin:0">
+              <input type="checkbox" id="autoAdapt" checked>
+              <span>Автодожим ошибок в процессе</span>
+            </label>
+          </div>
+          <div style="display:flex;align-items:flex-end">
+            <label style="display:flex;gap:6px;align-items:center;cursor:pointer;margin:0">
+              <input type="checkbox" id="forceAiFirst" checked>
+              <span>Всегда сначала AI (не кеш)</span>
+            </label>
+          </div>
+        </div>
+
+        <button class="btn btn-primary btn-full" id="startBtn" onclick="startCheck()">
+          Запустить проверку
+        </button>
+        <button class="btn btn-danger btn-full" id="stopBtn" style="display:none" onclick="stopCheck()">
+          Остановить
+        </button>
+
+      </div>
+
+      <!-- Tab: History -->
+      <div id="tab-history" class="tab-pane">
+        <div id="sessionsList">
+          <div class="empty" style="height:180px">
+            <p>Нет сессий</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: Cache -->
+      <div id="tab-cache" class="tab-pane">
+        <div style="display:flex;gap:6px;margin-bottom:4px">
+          <button class="btn btn-danger" style="flex:1;font-size:12px" onclick="clearAllProfiles()">
+            Очистить весь кэш
+          </button>
+          <button class="btn" style="background:var(--card);border:1px solid var(--border);flex:0 0 auto;font-size:12px"
+            onclick="loadProfiles()">
+            ↻
+          </button>
+        </div>
+        <div id="profilesList" style="display:flex;flex-direction:column;gap:6px;margin-top:4px"></div>
+      </div>
+
+    </div>
+
+    <!-- ── Main panel ── -->
+    <div class="main">
+
+      <!-- Progress -->
+      <div class="progress-area">
+        <div class="progress-header">
+          <div>
+            <div class="progress-title" id="progressTitle">Ожидание запуска</div>
+            <div class="token-counter" id="tokenCounter" style="margin-top:3px">
+              Потрачено токенов: <span id="totalTokens">0</span>
+              (~$<span id="totalCost">0.0000</span>)
+            </div>
+          </div>
+          <div class="stats">
+            <div class="stat blue">
+              <div class="num" id="statTotal">0</div>
+              <div class="lbl">всего</div>
+            </div>
+            <div class="stat green">
+              <div class="num" id="statSuccess">0</div>
+              <div class="lbl">успех</div>
+            </div>
+            <div class="stat purple">
+              <div class="num" id="statCached">0</div>
+              <div class="lbl">из кеша</div>
+            </div>
+            <div class="stat orange">
+              <div class="num" id="statCaptcha">0</div>
+              <div class="lbl">капча</div>
+            </div>
+            <div class="stat" style="background:rgba(251,191,36,.08)">
+              <div class="num" id="statUncertain" style="color:#fcd34d">0</div>
+              <div class="lbl">неизвестно</div>
+            </div>
+            <div class="stat red">
+              <div class="num" id="statFailed">0</div>
+              <div class="lbl">ошибка</div>
+            </div>
+            <div class="stat muted">
+              <div class="num" id="statDone">0</div>
+              <div class="lbl">обработано</div>
+            </div>
+          </div>
+        </div>
+        <div class="progress-bar-wrap">
+          <div class="progress-bar" id="progressBar"></div>
+        </div>
+      </div>
+
+      <!-- Toolbar -->
+      <div class="toolbar">
+        <span style="font-size:11px;color:var(--muted)">Фильтр:</span>
+        <button class="filter-btn active" onclick="setFilter('all',this)">Все</button>
+        <button class="filter-btn" onclick="setFilter('success',this)">Успех</button>
+        <button class="filter-btn" onclick="setFilter('cached_profile',this)">Из кеша</button>
+        <button class="filter-btn" onclick="setFilter('captcha',this)">Капча</button>
+        <button class="filter-btn" onclick="setFilter('no_form',this)">Нет формы</button>
+        <button class="filter-btn" onclick="setFilter('failed',this)">Ошибка</button>
+        <div class="toolbar-right">
+          <button class="btn btn-ghost btn-sm" id="exportBtn" onclick="exportCsv()" disabled>Экспорт CSV</button>
+        </div>
+      </div>
+
+      <!-- Results -->
+      <div class="results-wrap">
+        <div id="emptyState" class="empty">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <p>Результаты появятся после запуска</p>
+        </div>
+        <table id="resultsTable" style="display:none">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>URL</th>
+              <th>Статус</th>
+              <th>Метод</th>
+              <th>Сообщение</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="resultsBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ── State ─────────────────────────────────────────────────────────────────────
+    let currentSid = null;
+    let ws = null;
+    let activeFilter = 'all';
+    let allRows = [];
+    let domainAttemptState = {};
+    let rowIndex = 0;
+    let stats = { total: 0, success: 0, cached: 0, captcha: 0, failed: 0, done: 0, tokens: 0 };
+
+    // ── Tabs ──────────────────────────────────────────────────────────────────────
+    function showTab(id, btn) {
+      document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.sidebar-tab').forEach(b => b.classList.remove('active'));
+      document.getElementById(id).classList.add('active');
+      btn.classList.add('active');
+      if (id === 'tab-history') loadHistory();
+    }
+
+    // ── URL counter ───────────────────────────────────────────────────────────────
+    function countUrls() {
+      const n = document.getElementById('urlsInput').value.split('\n').filter(l => l.trim()).length;
+      document.getElementById('urlCount').textContent = n ? `(${n})` : '';
+    }
+
+    function loadFile(input) {
+      const file = input.files[0]; if (!file) return;
+      const r = new FileReader();
+      r.onload = e => { document.getElementById('urlsInput').value = e.target.result; countUrls(); toast(`Загружен: ${file.name}`); };
+      r.readAsText(file, 'UTF-8');
+    }
+
+    // ── Start ─────────────────────────────────────────────────────────────────────
+    async function startCheck() {
+      const urlsRaw = document.getElementById('urlsInput').value.trim();
+      if (!urlsRaw) { toast('Введите список сайтов'); return; }
+      const urls = urlsRaw.split('\n').map(u => u.trim()).filter(Boolean);
+      if (!urls.length) { toast('Нет URL'); return; }
+
+      const body = {
+        session_name: document.getElementById('sessionName').value.trim() || 'Проверка',
+        urls,
+        firstname: document.getElementById('testFirstName').value.trim(),
+        lastname: document.getElementById('testLastName').value.trim(),
+        patronymic: document.getElementById('testPatronymic').value.trim(),
+        phone: document.getElementById('testPhone').value.trim(),
+        email: document.getElementById('testEmail').value.trim(),
+        comment: document.getElementById('testComment').value.trim(),
+        claude_key: document.getElementById('claudeKey').value.trim(),
+        rucaptcha_key: document.getElementById('rucaptchaKey').value.trim(),
+        max_attempts: parseInt(document.getElementById('maxAttempts').value || '3', 10),
+      };
+
+      let data;
+      try {
+        const r = await fetch('/api/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        data = await r.json();
+      } catch (e) { toast('Ошибка подключения'); return; }
+
+      if (data.error) { toast(data.error); return; }
+
+      currentSid = data.session_id;
+      resetResults(data.total);
+      setTitle(`Запуск: ${data.total} сайтов...`);
+      document.getElementById('startBtn').style.display = 'none';
+      document.getElementById('stopBtn').style.display = '';
+      document.getElementById('exportBtn').disabled = true;
+      connectWs(currentSid);
+    }
+
+    // ── WebSocket ─────────────────────────────────────────────────────────────────
+    function connectWs(sid) {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      ws = new WebSocket(`${proto}://${location.host}/ws/${sid}`);
+      ws.onmessage = e => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'start') {
+          stats.total = msg.total;
+          setTitle(`Проверка: ${document.getElementById('sessionName').value}`);
+        } else if (msg.type === 'attempt') {
+          domainAttemptState[msg.url] = {
+            attempt_no: msg.attempt_no || 1,
+            max_attempts: msg.max_attempts || 1,
+            retrying: !!msg.retrying,
+          };
+          const host = (msg.url || '').replace(/^https?:\/\//, '').split('/')[0];
+          setTitle(`Проверка: ${host} (${msg.attempt_no}/${msg.max_attempts})`);
+        } else if (msg.type === 'attempt_result') {
+          domainAttemptState[msg.url] = {
+            attempt_no: msg.attempt_no || 1,
+            max_attempts: msg.max_attempts || 1,
+            reason_code: msg.reason_code || '',
+            status: msg.status || '',
+          };
+        } else if (msg.type === 'result') {
+          addResult(msg);
+        } else if (msg.type === 'done') {
+          onDone();
+        }
+      };
+      ws.onclose = () => { if (document.getElementById('stopBtn').style.display !== 'none') onDone(); };
+    }
+
+    // ── Results ───────────────────────────────────────────────────────────────────
+    function resetResults(total) {
+      allRows = []; rowIndex = 0;
+      domainAttemptState = {};
+      stats = { total, success: 0, cached: 0, captcha: 0, failed: 0, uncertain: 0, done: 0, tokens: 0 };
+      document.getElementById('resultsBody').innerHTML = '';
+      document.getElementById('resultsTable').style.display = '';
+      document.getElementById('emptyState').style.display = 'none';
+      updateStats();
+    }
+
+    function addResult(r) {
+      rowIndex++;
+      r._idx = rowIndex;
+      allRows.push(r);
+      stats.done++;
+      stats.tokens += r.tokens_used || 0;
+      if (r.status === 'success' || r.status === 'calltouch_api') stats.success++;
+      else if (r.status === 'cached_profile') { stats.success++; stats.cached++; }
+      else if (r.status === 'captcha') stats.captcha++;
+      else if (r.status === 'uncertain') stats.uncertain = (stats.uncertain || 0) + 1;
+      else stats.failed++;
+      updateStats();
+      setTitle(`Проверка: обработано ${stats.done}/${stats.total}`);
+      if (matchFilter(r)) renderRow(r, true);
+    }
+
+    function matchFilter(r) {
+      if (activeFilter === 'all') return true;
+      if (activeFilter === 'success') return ['success', 'calltouch_api', 'cached_profile'].includes(r.status);
+      if (activeFilter === 'failed') return ['failed', 'site_error', 'ai_error', 'no_ai_key'].includes(r.status);
+      return r.status === activeFilter;
+    }
+
+    const STATUS_LABELS = {
+      success: 'Успех',
+      cached_profile: 'Кеш',
+      calltouch_api: 'Calltouch API',
+      captcha: 'Капча',
+      uncertain: 'Неизвестно',
+      no_form: 'Нет формы',
+      no_ai_key: 'Нет ключа AI',
+      ai_error: 'Ошибка AI',
+      site_error: 'Сайт недоступен',
+      failed: 'Ошибка',
+    };
+    const METHOD_LABELS = {
+      calltouch_api: 'Calltouch API',
+      ai_playwright: 'AI + Playwright',
+      heuristic_playwright: 'Локальная эвристика',
+      cached_profile: 'Кеш профиля',
+      none: '—',
+    };
+
+    function renderRow(r, animate) {
+      const tbody = document.getElementById('resultsBody');
+      if (document.getElementById(`row-${r._idx}`)) return;
+
+      const tr = document.createElement('tr');
+      tr.id = `row-${r._idx}`;
+      if (animate) tr.classList.add('row-new');
+
+      const label = STATUS_LABELS[r.status] || r.status;
+      const method = METHOD_LABELS[r.method] || r.method;
+      const profileTag = r.profile_saved ? '<span class="profile-tag">💾 профиль</span>' : '';
+      const tokTag = r.tokens_used > 0 ? `<span class="tokens-tag">${r.tokens_used}t</span>` : '';
+      const visionTag = r.vision_used ? '<span class="vision-tag">👁 vision</span>' : '';
+      const attemptTag = r.attempt_no ? `<span class="tokens-tag">try:${r.attempt_no}${r.max_attempts ? '/' + r.max_attempts : ''}</span>` : '';
+      const reasonTag = r.reason_code ? `<span class="tokens-tag">${esc(r.reason_code)}</span>` : '';
+      const notes = r.ai_notes || '';
+      const hasDetail = !!(notes || r.vision_notes);
+
+      tr.innerHTML = `
+    <td style="color:var(--muted);font-size:11px;width:34px">${r._idx}</td>
+    <td class="td-url"><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a></td>
+    <td><span class="status-badge s-${r.status}">${label}</span></td>
+    <td>
+      <span class="method-tag">${esc(method)}</span>
+      ${profileTag}${visionTag}${tokTag}${attemptTag}${reasonTag}
+    </td>
+    <td class="td-msg">${esc(r.message || '')}</td>
+    <td style="width:36px">${hasDetail
+          ? `<button class="expand-btn" onclick="toggleDetail(${r._idx},this)">▶</button>`
+          : ''}</td>
+  `;
+      tbody.insertBefore(tr, tbody.firstChild);
+
+      if (hasDetail) {
+        const dr = document.createElement('tr');
+        dr.id = `det-${r._idx}`;
+        dr.className = 'detail-row';
+        dr.style.display = 'none';
+        let detHtml = '';
+        if (notes) detHtml += `<div><b>AI (DeepSeek):</b> ${esc(notes)}</div>`;
+        if (r.vision_notes) detHtml += `<div><b>👁 Vision (gpt-4o):</b> ${esc(r.vision_notes)}</div>`;
+        dr.innerHTML = `<td colspan="6"><div class="detail-inner">${detHtml}</div></td>`;
+        tbody.insertBefore(dr, tr.nextSibling);
+      }
+    }
+
+    function toggleDetail(idx, btn) {
+      const dr = document.getElementById(`det-${idx}`);
+      if (!dr) return;
+      const open = dr.style.display !== 'none';
+      dr.style.display = open ? 'none' : '';
+      btn.textContent = open ? '▶' : '▼';
+    }
+
+    // ── Filter ────────────────────────────────────────────────────────────────────
+    function setFilter(f, btn) {
+      activeFilter = f;
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      rebuildTable();
+    }
+
+    function rebuildTable() {
+      document.getElementById('resultsBody').innerHTML = '';
+      [...allRows].reverse().forEach(r => { if (matchFilter(r)) renderRow(r, false); });
+    }
+
+    // ── Stats ─────────────────────────────────────────────────────────────────────
+    function updateStats() {
+      document.getElementById('statTotal').textContent = stats.total;
+      document.getElementById('statSuccess').textContent = stats.success;
+      document.getElementById('statCached').textContent = stats.cached;
+      document.getElementById('statCaptcha').textContent = stats.captcha;
+      document.getElementById('statUncertain').textContent = stats.uncertain || 0;
+      document.getElementById('statFailed').textContent = stats.failed;
+      document.getElementById('statDone').textContent = stats.done;
+      document.getElementById('totalTokens').textContent = stats.tokens.toLocaleString();
+      const cost = (stats.tokens * 0.00000035).toFixed(4);
+      document.getElementById('totalCost').textContent = cost;
+      const pct = stats.total > 0 ? (stats.done / stats.total * 100) : 0;
+      document.getElementById('progressBar').style.width = pct + '%';
+    }
+
+    function setTitle(t) { document.getElementById('progressTitle').textContent = t; }
+
+    // ── Done ──────────────────────────────────────────────────────────────────────
+    function onDone() {
+      document.getElementById('startBtn').style.display = '';
+      document.getElementById('stopBtn').style.display = 'none';
+      document.getElementById('exportBtn').disabled = false;
+      setTitle(`Готово: ${stats.success}/${stats.total} успешно | ${stats.tokens.toLocaleString()} токенов`);
+      toast(`Проверка завершена: ${stats.success} из ${stats.total}`);
+      if (ws) { ws.close(); ws = null; }
+      refreshProfilesInfo();
+    }
+
+    function stopCheck() {
+      if (ws) { ws.close(); ws = null; }
+      onDone();
+      toast('Остановлено');
+    }
+
+    // ── Export ────────────────────────────────────────────────────────────────────
+    function exportCsv() {
+      if (currentSid) window.location.href = `/api/sessions/${currentSid}/export`;
+    }
+
+    // ── History ───────────────────────────────────────────────────────────────────
+    async function loadHistory() {
+      const c = document.getElementById('sessionsList');
+      let sessions;
+      try { sessions = await fetch('/api/sessions').then(r => r.json()); }
+      catch (e) { c.innerHTML = '<p style="color:var(--muted);padding:12px;font-size:13px">Ошибка</p>'; return; }
+
+      if (!sessions.length) {
+        c.innerHTML = '<div class="empty" style="height:160px"><p>Нет сессий</p></div>'; return;
+      }
+      c.innerHTML = sessions.map(s => `
+    <div class="session-item ${s.id === currentSid ? 'active' : ''}" onclick="loadSession('${s.id}',this)">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start">
+        <div class="s-name">${esc(s.name)}</div>
+        <span class="session-badge badge-${s.status}">${s.status}</span>
+      </div>
+      <div class="s-meta">
+        ${s.total} сайтов &bull;
+        <span style="color:var(--green)">${s.success} ок</span> /
+        <span style="color:var(--red)">${s.failed} ошибок</span>
+        &bull; ${s.tokens || 0} токенов
+        &bull; ${fmtDate(s.created_at)}
+      </div>
+    </div>
+  `).join('');
+    }
+
+    async function loadSession(sid, el) {
+      document.querySelectorAll('.session-item').forEach(i => i.classList.remove('active'));
+      el.classList.add('active');
+      currentSid = sid;
+      document.getElementById('exportBtn').disabled = false;
+
+      let results, sessions;
+      try {
+        [results, sessions] = await Promise.all([
+          fetch(`/api/sessions/${sid}/results`).then(r => r.json()),
+          fetch('/api/sessions').then(r => r.json()),
+        ]);
+      } catch (e) { toast('Ошибка загрузки'); return; }
+
+      const sess = sessions.find(s => s.id === sid);
+      resetResults(sess ? sess.total : results.length);
+      stats.success = sess ? sess.success : 0;
+      stats.failed = sess ? sess.failed : 0;
+      stats.tokens = sess ? (sess.tokens || 0) : 0;
+      stats.done = results.length;
+
+      allRows = results.map((r, i) => ({
+        _idx: i + 1,
+        url: r.url, status: r.status, method: r.method,
+        message: r.message, tokens_used: r.tokens_used || 0,
+        profile_saved: !!r.profile_saved, ai_notes: r.ai_notes || '',
+        reason_code: r.reason_code || '',
+        attempt_no: r.attempt_no || 1,
+        vision_used: !!r.vision_used, vision_notes: r.vision_notes || '',
+      }));
+      rowIndex = allRows.length;
+
+      rebuildTable();
+      updateStats();
+      setTitle(`${sess ? sess.name : sid} — история`);
+      showTab('tab-new', document.querySelectorAll('.sidebar-tab')[0]);
+    }
+
+    // ── Profiles info ─────────────────────────────────────────────────────────────
+    async function refreshProfilesInfo() {
+      try {
+        const d = await fetch('/api/profiles/count').then(r => r.json());
+        // Считаем consent-файлы через profiles list
+        const profiles = await fetch('/api/profiles').then(r => r.json()).catch(() => []);
+        const consentCount = profiles.filter(p => p.has_consent).length;
+        let txt = `Профилей: ${d.count}`;
+        if (consentCount) txt += ` · Consent: ${consentCount}`;
+        document.getElementById('profilesInfo').textContent = txt;
+      } catch (e) { }
+    }
+
+    async function loadProfiles() {
+      const list = document.getElementById('profilesList');
+      list.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px 0">Загрузка...</div>';
+      try {
+        const profiles = await fetch('/api/profiles').then(r => r.json());
+        if (!profiles.length) {
+          list.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px 0">Кэш пуст</div>';
+          return;
+        }
+        list.innerHTML = profiles.map(p => `
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:8px 10px;font-size:12px">
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-weight:600;color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.domain)}">${esc(p.domain)}</span>
+          <button onclick="deleteProfile('${esc(p.domain)}')" title="Удалить профиль"
+            style="background:none;border:none;color:var(--red);cursor:pointer;font-size:14px;padding:0 2px;flex-shrink:0">✕</button>
+        </div>
+        <div style="color:var(--muted);margin-top:3px;display:flex;gap:8px;flex-wrap:wrap">
+          ${p.has_captcha ? '<span style="color:var(--yellow)">⚠ капча</span>' : ''}
+          ${p.dropdowns > 0 ? `<span>📋 ${p.dropdowns} дропд.</span>` : ''}
+          ${p.cookie_selector ? '<span style="color:var(--accent)">🍪 AI-куки</span>' : ''}
+          ${p.has_consent ? '<span style="color:var(--green)" title="Согласие с куки сохранено — баннер не появится">🔒 consent</span>' : ''}
+          <span>✓ ${p.success_count} успехов</span>
+          <span>${p.tokens_used} токенов</span>
+        </div>
+      </div>
+    `).join('');
+      } catch (e) {
+        list.innerHTML = '<div style="color:var(--red);font-size:12px">Ошибка загрузки</div>';
+      }
+    }
+
+    async function deleteProfile(domain) {
+      if (!confirm(`Удалить профиль для ${domain}?`)) return;
+      await fetch(`/api/profiles/${encodeURIComponent(domain)}`, { method: 'DELETE' });
+      toast(`Профиль ${domain} удалён`);
+      loadProfiles();
+      refreshProfilesInfo();
+    }
+
+    async function clearAllProfiles() {
+      if (!confirm('Удалить ВСЕ закешированные профили?\nСледующий запуск заново запросит AI для каждого сайта.')) return;
+      await fetch('/api/profiles', { method: 'DELETE' });
+      toast('Весь кэш профилей очищен');
+      loadProfiles();
+      refreshProfilesInfo();
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────────
+    function esc(s) {
+      return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    function fmtDate(s) {
+      if (!s) return '';
+      const d = new Date(s.replace(' ', 'T'));
+      return isNaN(d) ? s : d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    }
+    function toast(msg, ms = 3000) {
+      const el = document.createElement('div');
+      el.className = 'toast'; el.textContent = msg;
+      document.body.appendChild(el);
+      setTimeout(() => el.remove(), ms);
+    }
+
+    // ── Init ──────────────────────────────────────────────────────────────────────
+    (async function () {
+      countUrls();
+      await refreshProfilesInfo();
+      try {
+        const sessions = await fetch('/api/sessions').then(r => r.json());
+        if (sessions.length) {
+          document.querySelectorAll('.sidebar-tab')[1].textContent = `История (${sessions.length})`;
+        }
+      } catch (_) { }
+    })();
+  </script>
+</body>
+
+</html>
