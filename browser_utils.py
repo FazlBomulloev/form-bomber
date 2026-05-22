@@ -108,16 +108,15 @@ async def dismiss_cookie_banners(
             continue
 
 
-async def suppress_widgets(page):
+async def suppress_widgets(page, keep_calltouch=False):
     try:
-        await page.evaluate(r"""() => {
+        await page.evaluate(r"""(keepCT) => {
             const sels = [
                 '[class*="chat" i]','[id*="chat" i]',
                 '[class*="widget" i]',
                 '[class*="whatsapp" i]',
                 '[class*="jivo" i]','[id*="jivo" i]',
                 '[class*="crisp" i]',
-                '[class*="calltouch" i]',
                 '[class*="envybox" i]',
                 '[class*="callbackhunter" i]',
                 '[class*="comagic" i]',
@@ -126,6 +125,8 @@ async def suppress_widgets(page):
                 '[class*="callibri" i]',
                 '[class*="chatra" i]',
             ];
+            if (!keepCT)
+                sels.push('[class*="calltouch" i]');
             const isForm = (el) =>
                 !!el.closest('form');
             for (const s of sels) {
@@ -151,9 +152,27 @@ async def suppress_widgets(page):
                     }
                 }
             }
-        }""")
+        }""", keep_calltouch)
     except Exception:
         pass
+
+
+async def has_calltouch(page):
+    try:
+        return await page.evaluate(r"""() => {
+            return !!(
+                document.querySelector(
+                    '[class*="calltouch" i]')
+                || document.querySelector(
+                    'iframe[src*="calltouch" i]')
+                || document.querySelector(
+                    'script[src*="calltouch" i]')
+                || window.ct
+                || window.calltouch
+            );
+        }""")
+    except Exception:
+        return False
 
 
 async def clear_overlays(page):

@@ -122,40 +122,56 @@ async def check_xhr_result(page):
                 /success|"ok"|"status":\s*"?(?:ok|true)|спасибо|thank|принят|отправлен|записан|получили|"result":\s*"?(?:ok|success)|mail_sent|sent_ok|"sent":\s*true|"message_sent"|благодар/i;
             const errRe =
                 /error|"status":\s*"?(?:fail|error)|ошибка|invalid|captcha|validation/i;
+            const skipUrlRe =
+                /metric|analytic|yandex|google|pixel|beacon|log|stat/;
 
-            for (const r of rs) {
+            let hasSuccess = false;
+            let successResult = null;
+            let hasCaptcha = false;
+            let captchaResult = null;
+            let hasError = false;
+            let errorResult = null;
+
+            for (let i = rs.length - 1; i >= 0; i--) {
+                const r = rs[i];
                 const b = r.b || '';
                 if (!b || b.length < 3) continue;
-                // Пропуск аналитики/метрик
                 const u = (r.url||'').toLowerCase();
-                if (/metric|analytic|yandex|google|pixel|beacon|log|stat/
-                    .test(u)) continue;
+                if (skipUrlRe.test(u)) continue;
 
-                // Tilda needcaptcha → специальный статус
-                if (/needcaptcha/.test(b)) {
-                    return {
-                        state: 'captcha_required',
-                        match: 'XHR: needcaptcha',
-                    };
-                }
-
-                if (r.s >= 200 && r.s < 300
-                    && okRe.test(b)) {
-                    return {
+                if (!hasSuccess && r.s >= 200
+                    && r.s < 300 && okRe.test(b)) {
+                    hasSuccess = true;
+                    successResult = {
                         state: 'success',
                         match: 'XHR: '
                             + b.substring(0, 60),
                     };
                 }
-                if ((r.s >= 400 || errRe.test(b))
-                    && !okRe.test(b)) {
-                    return {
+                if (!hasCaptcha
+                    && /needcaptcha/.test(b)) {
+                    hasCaptcha = true;
+                    captchaResult = {
+                        state: 'captcha_required',
+                        match: 'XHR: needcaptcha',
+                    };
+                }
+                if (!hasError
+                    && (r.s >= 400 || errRe.test(b))
+                    && !okRe.test(b)
+                    && !/needcaptcha/.test(b)) {
+                    hasError = true;
+                    errorResult = {
                         state: 'error',
                         match: 'XHR err: '
                             + b.substring(0, 60),
                     };
                 }
             }
+
+            if (hasSuccess) return successResult;
+            if (hasCaptcha) return captchaResult;
+            if (hasError) return errorResult;
 
             // Успешный POST без тела ответа
             for (const r of rs) {
@@ -216,6 +232,16 @@ async def detect_submission_result(
                         && st.visibility !== 'hidden'
                         && st.opacity !== '0';
                 } catch(e) { return false; }
+            }
+
+            // --- wpcf7: класс на форме ---
+            if (formEl) {
+                try {
+                    const cls = (formEl.className || '').toString().toLowerCase();
+                    if (/wpcf7/.test(cls) && /\bsent\b|mail-sent/.test(cls)) {
+                        return {state: 'success', match: 'wpcf7 form class: sent'};
+                    }
+                } catch(e) {}
             }
 
             // --- Проверка: форма исчезла ---

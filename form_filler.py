@@ -499,26 +499,28 @@ async def smart_phone_fill(
             page, el, phone_short, 80,
         )
     else:
+        kb = _get_keyboard(page)
         try:
-            await el.fill("")
+            await kb.press("Control+a")
+            await asyncio.sleep(0.05)
+            await kb.press("Delete")
+            await asyncio.sleep(0.1)
         except Exception:
-            pass
-        await asyncio.sleep(0.1)
+            try:
+                await el.fill("")
+            except Exception:
+                pass
+        await asyncio.sleep(0.15)
         prefill = await page.evaluate(
             "el => el.value || ''", el
         ) or ""
-        if re.search(r'^\+7', prefill.strip()):
+        if re.search(r'[\+\d]', prefill.strip()):
             await _slow_type(
                 page, el, phone_short, 70,
             )
         else:
-            try:
-                await el.fill(phone7)
-            except Exception:
-                pass
-            await asyncio.sleep(0.15)
-            await react_patch_input(
-                page, el, phone7,
+            await _slow_type(
+                page, el, phone7, 70,
             )
 
     await asyncio.sleep(0.3)
@@ -638,13 +640,26 @@ async def _select_first(page, sel, sel_type="native"):
 async def _check_all_consent_boxes(
     page, form_el=None
 ):
+    log = get_logger()
+    n = 0
+
     try:
-        return await page.evaluate(r"""root => {
-            const scope = root || document;
-            let n = 0;
-            for (const cb of
-                scope.querySelectorAll(
-                    'input[type="checkbox"]')) {
+        unchecked = await page.evaluate(r"""root => {
+            let scope = root || document;
+            let cbs = scope.querySelectorAll(
+                'input[type="checkbox"]');
+            if (root && cbs.length === 0) {
+                let up = root;
+                for (let i = 0; i < 3 && up.parentElement; i++) {
+                    up = up.parentElement;
+                    const found = up.querySelectorAll(
+                        'input[type="checkbox"]');
+                    if (found.length > 0) { scope = up; cbs = found; break; }
+                }
+            }
+            const results = [];
+            const onlyOne = cbs.length === 1;
+            for (const cb of cbs) {
                 if (cb.checked) continue;
                 let lblText = '';
                 try {
@@ -671,62 +686,181 @@ async def _check_all_consent_boxes(
                 const isRequired = cb.required
                     || cb.getAttribute(
                         'aria-required') === 'true';
+                if (!(isConsent || isRequired || onlyOne))
+                    continue;
+                let wrapperSel = null;
+                if (cb.id) {
+                    const lbl = scope.querySelector(
+                        'label[for="'+cb.id+'"]');
+                    if (lbl) {
+                        if (lbl.id) wrapperSel = '#' + lbl.id;
+                        else if (lbl.className) {
+                            const cls = lbl.className.toString()
+                                .split(' ').filter(Boolean)[0];
+                            if (cls) wrapperSel =
+                                'label.' + cls + '[for="'+cb.id+'"]';
+                        }
+                        if (!wrapperSel)
+                            wrapperSel = 'label[for="'+cb.id+'"]';
+                    }
+                }
+                if (!wrapperSel) {
+                    const parent = cb.parentElement;
+                    if (parent) {
+                        const pCls = (parent.className||'')
+                            .toString().toLowerCase();
+                        if (/checkbox|policy|consent|agree/.test(pCls)) {
+                            const cls = parent.className.toString()
+                                .split(' ').filter(Boolean)[0];
+                            if (cls) wrapperSel =
+                                parent.tagName.toLowerCase()
+                                + '.' + cls;
+                        }
+                        const label = cb.closest('label');
+                        if (!wrapperSel && label) {
+                            if (label.className) {
+                                const cls = label.className.toString()
+                                    .split(' ').filter(Boolean)[0];
+                                if (cls) wrapperSel = 'label.' + cls;
+                            } else {
+                                wrapperSel = null;
+                            }
+                        }
+                    }
+                }
+                let cbSel = null;
+                if (cb.id) cbSel = '#' + cb.id;
+                else if (cb.name) cbSel =
+                    'input[type="checkbox"][name="'+cb.name+'"]';
+                results.push({cbSel, wrapperSel});
+            }
+            return results;
+        }""", form_el)
+    except Exception:
+        unchecked = []
+
+    for item in (unchecked or []):
+        clicked = False
+        wrapper_sel = item.get("wrapperSel")
+        cb_sel = item.get("cbSel")
+
+        if wrapper_sel:
+            try:
+                wrapper = await page.query_selector(
+                    wrapper_sel)
+                if wrapper:
+                    await wrapper.click(timeout=2000)
+                    await asyncio.sleep(0.2)
+                    clicked = True
+                    n += 1
+            except Exception:
+                pass
+
+        if not clicked and cb_sel:
+            try:
+                cb_el = await page.query_selector(cb_sel)
+                if cb_el:
+                    await cb_el.click(
+                        timeout=2000, force=True)
+                    await asyncio.sleep(0.2)
+                    clicked = True
+                    n += 1
+            except Exception:
+                pass
+
+        if not clicked and cb_sel:
+            try:
+                await page.evaluate(r"""sel => {
+                    const cb = document.querySelector(sel);
+                    if (!cb) return;
+                    cb.checked = true;
+                    cb.dispatchEvent(
+                        new Event('change', {bubbles:true}));
+                    cb.dispatchEvent(
+                        new Event('click', {bubbles:true}));
+                }""", cb_sel)
+                n += 1
+            except Exception:
+                pass
+
+    try:
+        n += await page.evaluate(r"""root => {
+            const scope = root || document;
+            let fixed = 0;
+            for (const cb of scope.querySelectorAll(
+                'input[type="checkbox"]')) {
+                if (cb.checked) continue;
+                let lblText = '';
+                try {
+                    if (cb.id) {
+                        const l = scope.querySelector(
+                            'label[for="'+cb.id+'"]');
+                        if (l) lblText = (l.innerText||'');
+                    }
+                    if (!lblText) {
+                        const pl = cb.closest('label');
+                        if (pl) lblText = (pl.innerText||'');
+                    }
+                    if (!lblText && cb.parentElement)
+                        lblText = (cb.parentElement.innerText||'');
+                } catch(e) {}
+                const sig = (
+                    (cb.name||'') + ' ' + (cb.id||'')
+                    + ' ' + (cb.className||'')
+                    + ' ' + lblText
+                ).toLowerCase();
+                const isConsent = /consent|agree|policy|accept|соглас|персональн|обработк|конфиденц|privacy|gdpr/.test(sig);
+                const isRequired = cb.required
+                    || cb.getAttribute('aria-required') === 'true';
                 const onlyOne = scope.querySelectorAll(
-                    'input[type="checkbox"]'
-                ).length === 1;
+                    'input[type="checkbox"]').length === 1;
                 if (isConsent || isRequired || onlyOne) {
                     try {
                         cb.checked = true;
                         cb.dispatchEvent(
-                            new Event('change',
-                                {bubbles:true})
-                        );
+                            new Event('change', {bubbles:true}));
                         cb.dispatchEvent(
-                            new Event('click',
-                                {bubbles:true})
-                        );
-                        n++;
+                            new Event('click', {bubbles:true}));
+                        fixed++;
                     } catch(e) {}
                 }
             }
-            // Обязательные radio-группы без выбора
             const radioNames = new Set();
-            for (const rd of
-                scope.querySelectorAll(
-                    'input[type="radio"]')) {
+            for (const rd of scope.querySelectorAll(
+                'input[type="radio"]')) {
                 if (!rd.name) continue;
                 if (radioNames.has(rd.name)) continue;
                 const group = scope.querySelectorAll(
-                    'input[type="radio"]'
-                    + '[name="'+rd.name+'"]');
+                    'input[type="radio"][name="'+rd.name+'"]');
                 const anyChecked = Array.from(group)
                     .some(r => r.checked);
                 if (anyChecked) {
                     radioNames.add(rd.name);
                     continue;
                 }
-                const isReq = Array.from(group)
-                    .some(r => r.required
-                        || r.getAttribute(
-                            'aria-required') === 'true');
+                const isReq = Array.from(group).some(
+                    r => r.required
+                        || r.getAttribute('aria-required') === 'true');
                 if (isReq) {
                     try {
                         group[0].checked = true;
                         group[0].dispatchEvent(
-                            new Event('change',
-                                {bubbles:true}));
+                            new Event('change', {bubbles:true}));
                         group[0].dispatchEvent(
-                            new Event('click',
-                                {bubbles:true}));
-                        n++;
+                            new Event('click', {bubbles:true}));
+                        fixed++;
                     } catch(e) {}
                 }
                 radioNames.add(rd.name);
             }
-            return n;
-        }""", form_el)
+            return fixed;
+        }""", form_el) or 0
     except Exception:
-        return 0
+        pass
+
+    if log and n:
+        log.ok(f"чекбоксы согласия: {n}")
+    return n
 
 
 async def _prefill_date_fields(
@@ -993,17 +1127,25 @@ async def do_submit(page, submit_sel, form_el=None):
                 return True
 
     if form_el:
-        try:
-            await page.evaluate(
-                r"f => { try{f.submit();}catch(e){}"
-                r" }", form_el,
-            )
-            if log:
-                log.log_action("submit", "form.submit()")
-            await asyncio.sleep(3.5)
-            return True
-        except Exception:
-            pass
+        for sel in [
+            'button[type="submit"]',
+            'input[type="submit"]',
+            'button:not([type])',
+        ]:
+            try:
+                btn = await form_el.query_selector(sel)
+                if btn:
+                    await smart_click(
+                        page, btn, aggressive=True,
+                    )
+                    if log:
+                        log.log_action(
+                            "submit", f"form>{sel}",
+                        )
+                    await asyncio.sleep(3.5)
+                    return True
+            except Exception:
+                continue
 
     for sel in [
         'button[type="submit"]',
@@ -1067,6 +1209,22 @@ async def do_submit(page, submit_sel, form_el=None):
                 return True
     except Exception:
         pass
+
+    if form_el:
+        try:
+            await page.evaluate(
+                r"f => { try{f.requestSubmit();"
+                r"}catch(e){f.submit();} }",
+                form_el,
+            )
+            if log:
+                log.log_action(
+                    "submit", "requestSubmit()",
+                )
+            await asyncio.sleep(3.5)
+            return True
+        except Exception:
+            pass
 
     if log:
         log.err("submit", "кнопка submit не найдена")
@@ -1188,6 +1346,11 @@ async def fill_all_empty_fields(
                     role = 'dropdown';
                 else if (tag === 'textarea')
                     role = 'comment';
+                if (/captcha|capcha|код.с.картинк|verification.?code|security.?code|проверочн/i
+                    .test(nm + ' ' + ph + ' '
+                        + (el.id||'')
+                        + ' ' + (el.className||'')))
+                    role = 'captcha';
                 result.push({sel, role, tp, nm, ph});
             }
             return result;
@@ -1200,6 +1363,8 @@ async def fill_all_empty_fields(
         sel = f["sel"]
         role = f["role"]
         try:
+            if role == "captcha":
+                continue
             if role == "phone":
                 ok = await smart_phone_fill(
                     page, sel, phone, form_el,
@@ -1440,39 +1605,131 @@ async def submit_with_retry(
             "unchanged", "error",
             "captcha_required",
         ) and attempt == 1:
-            from captcha import handle_captcha
+            from captcha import (
+                handle_captcha,
+                handle_post_submit_captcha,
+                _handle_tilda_needcaptcha,
+            )
             post_captcha = None
-            for _cw in range(3):
-                await asyncio.sleep(3)
-                post_captcha = await handle_captcha(
-                    page, page.url,
-                    rucaptcha_key,
-                    has_captcha_hint=True,
+            is_tilda_nc = (
+                state == "captcha_required"
+                and "needcaptcha" in (
+                    dom.get("match", "")
                 )
-                if post_captcha is not None:
-                    break
+            )
+            if is_tilda_nc:
+                try:
+                    post_captcha = (
+                        await _handle_tilda_needcaptcha(
+                            page, page.url,
+                            rucaptcha_key,
+                        )
+                    )
+                except Exception:
+                    pass
+            if not post_captcha:
+                try:
+                    post_captcha = (
+                        await handle_post_submit_captcha(
+                            page, page.url,
+                            rucaptcha_key,
+                        )
+                    )
+                except Exception:
+                    pass
+            if not post_captcha:
+                try:
+                    post_captcha = await handle_captcha(
+                        page, page.url,
+                        rucaptcha_key,
+                        has_captcha_hint=True,
+                    )
+                except Exception:
+                    pass
+            if post_captcha == "tilda_auto_submitted":
+                if log:
+                    log.ok(
+                        "капча решена, Tilda "
+                        "авто-ресабмит: success"
+                    )
+                return {
+                    "state": "success",
+                    "match": "tilda_auto_resubmit",
+                }
             if post_captcha == "ok":
                 if log:
                     log.ok("капча после submit решена")
+                await setup_xhr_listener(page)
                 await do_submit(
                     page, submit_sel, form_el,
                 )
                 await asyncio.sleep(3.5)
-                dom2 = await detect_submission_result(
-                    page, form_el, pre_text,
-                    url_changed=(
-                        pre_url.rstrip("/")
-                        != page.url.rstrip("/")
-                    ),
-                )
+                try:
+                    dom2 = (
+                        await detect_submission_result(
+                            page, form_el, pre_text,
+                            url_changed=(
+                                pre_url.rstrip("/")
+                                != page.url.rstrip("/")
+                            ),
+                        )
+                    )
+                except Exception:
+                    dom2 = {
+                        "state": "unchanged",
+                        "match": "",
+                    }
                 s2 = dom2.get("state", "unchanged")
                 if s2 in (
                     "success", "likely_success",
                 ):
                     dom2["state"] = "success"
                     return dom2
+                if s2 == "unchanged":
+                    await asyncio.sleep(2)
+                    try:
+                        dom3 = (
+                            await detect_submission_result(
+                                page, form_el,
+                                pre_text,
+                                url_changed=(
+                                    pre_url.rstrip("/")
+                                    != page.url.rstrip(
+                                        "/"
+                                    )
+                                ),
+                            )
+                        )
+                    except Exception:
+                        dom3 = {
+                            "state": "unchanged",
+                            "match": "",
+                        }
+                    s3 = dom3.get(
+                        "state", "unchanged"
+                    )
+                    if s3 in (
+                        "success", "likely_success",
+                    ):
+                        dom3["state"] = "success"
+                        return dom3
 
         if state == "captcha_required":
+            return dom
+
+        if state == "error" and any(
+            kw in (dom.get("match", "").lower())
+            for kw in (
+                "превысили", "лимит",
+                "too many", "rate limit",
+                "слишком много",
+            )
+        ):
+            if log:
+                log.warn(
+                    f"rate limit: {dom.get('match','')}"
+                    f", повтор бесполезен"
+                )
             return dom
 
         if state in (

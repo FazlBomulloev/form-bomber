@@ -192,15 +192,44 @@ async def _solve_smartcaptcha_overlay(
             if (/captcha|smartcaptcha/.test(sig))
                 return el.getAttribute('data-sitekey');
         }
+        // 2b. Любой data-sitekey начинающийся с ysc
+        for (const el of els) {
+            const k = el.getAttribute('data-sitekey') || '';
+            if (k.startsWith('ysc1_')) return k;
+        }
         // 3. из inline-скриптов
         const scripts = document.querySelectorAll(
             'script:not([src])');
         for (const s of scripts) {
             const t = s.textContent || '';
             const m = t.match(
-                /sitekey['":\s]+['"]([^'"]+)['"]/i);
+                /sitekey['":\s]+['"]([^'"]{10,})['"]/i);
             if (m && /captcha/i.test(t))
                 return m[1];
+        }
+        // 4. Tilda: sitekey из window переменных
+        try {
+            if (window.tildaForm
+                && window.tildaForm.captchaKey)
+                return window.tildaForm.captchaKey;
+        } catch(e) {}
+        // 5. Любой script src с sitekey
+        const extScripts = document.querySelectorAll(
+            'script[src*="smartcaptcha" i],'
+            + 'script[src*="captcha-cloud" i],'
+            + 'script[src*="captcha.yandex" i]'
+        );
+        for (const s of extScripts) {
+            const m = (s.src||'').match(
+                /sitekey=([^&]+)/i);
+            if (m) return m[1];
+        }
+        // 6. meta-теги
+        const meta = document.querySelector(
+            'meta[name*="captcha" i][content]');
+        if (meta) {
+            const c = meta.getAttribute('content');
+            if (c && c.length > 10) return c;
         }
         return null;
     }""")
@@ -250,27 +279,39 @@ async def _solve_smartcaptcha_overlay(
             }
         }""", token)
 
-        # Попробуем кликнуть чекбокс
-        for sel in [
-            'iframe[src*="smartcaptcha"]',
-            'iframe[src*="captcha-cloud"]',
-        ]:
-            frame_el = await page.query_selector(sel)
-            if not frame_el:
+        # Кликаем чекбокс через все фреймы
+        #   (включая вложенные)
+        _SC_P = (
+            "smartcaptcha", "captcha-cloud",
+            "captcha-api", "captcha.yandex",
+        )
+        for frame in page.frames:
+            if frame == page.main_frame:
                 continue
             try:
-                frame = await frame_el.content_frame()
-                if not frame:
+                f = frame
+                is_sc = False
+                while f and f != page.main_frame:
+                    if any(
+                        p in f.url.lower()
+                        for p in _SC_P
+                    ):
+                        is_sc = True
+                        break
+                    f = f.parent_frame
+                if not is_sc:
                     continue
                 cb = await frame.query_selector(
                     'input[type="checkbox"],'
                     '.CheckboxCaptcha-Anchor,'
                     '[class*="checkbox" i],'
+                    '[role="checkbox"],'
                     'button'
                 )
                 if cb:
                     await cb.click()
                     await asyncio.sleep(2)
+                    break
             except Exception:
                 continue
 
@@ -407,7 +448,7 @@ async def _detect_slider_captcha(page, rucaptcha_key):
 
 async def _solve_captcha(
     captcha_type, sitekey, page_url, rucaptcha_key,
-    enterprise=False,
+    enterprise=False, max_tries=2,
 ):
     log = get_logger()
     if not rucaptcha_key or not sitekey:
@@ -423,13 +464,6 @@ async def _solve_captcha(
     if not method:
         return None
 
-    if log:
-        log.log_captcha(
-            "submit",
-            type=captcha_type,
-            sitekey=sitekey[:20],
-        )
-
     key_param = (
         "googlekey" if captcha_type == "recaptcha"
         else "sitekey"
@@ -444,73 +478,93 @@ async def _solve_captcha(
     if enterprise and captcha_type == "recaptcha":
         params["enterprise"] = 1
 
-    try:
-        async with aiohttp.ClientSession(
-            timeout=_TIMEOUT
-        ) as s:
-            async with s.post(
-                RUCAPTCHA_IN, data=params
-            ) as r:
-                resp = await r.json(
-                    content_type=None
-                )
-            if resp.get("status") != 1:
-                if log:
-                    log.log_captcha(
-                        "error_submit",
-                        error=resp.get(
-                            "request", "?"
-                        ),
-                    )
-                return None
-            task_id = resp["request"]
-            if log:
-                log.log_captcha(
-                    "task_created",
-                    task_id=task_id,
-                )
-
-            for attempt in range(30):
-                await asyncio.sleep(5)
-                async with s.get(
-                    RUCAPTCHA_RES,
-                    params={
-                        "key": rucaptcha_key,
-                        "action": "get",
-                        "id": task_id,
-                        "json": 1,
-                    },
-                ) as r2:
-                    res = await r2.json(
+    for solve_try in range(max_tries):
+        if log:
+            log.log_captcha(
+                "submit",
+                type=captcha_type,
+                sitekey=sitekey[:20],
+                try_no=solve_try + 1,
+            )
+        try:
+            async with aiohttp.ClientSession(
+                timeout=_TIMEOUT
+            ) as s:
+                async with s.post(
+                    RUCAPTCHA_IN, data=params
+                ) as r:
+                    resp = await r.json(
                         content_type=None
                     )
-                if res.get("status") == 1:
-                    token = res["request"]
+                if resp.get("status") != 1:
                     if log:
                         log.log_captcha(
-                            "solved",
-                            attempt=attempt,
-                            token=token[:30],
-                        )
-                    return token
-                if res.get("request") not in (
-                    "CAPCHA_NOT_READY",
-                    "CAPTCHA_NOT_READY",
-                ):
-                    if log:
-                        log.log_captcha(
-                            "error_poll",
-                            error=res.get(
+                            "error_submit",
+                            error=resp.get(
                                 "request", "?"
                             ),
                         )
                     return None
-    except Exception as e:
-        if log:
-            log.log_captcha(
-                "exception", error=str(e)[:120],
-            )
-        return None
+                task_id = resp["request"]
+                if log:
+                    log.log_captcha(
+                        "task_created",
+                        task_id=task_id,
+                    )
+
+                for attempt in range(30):
+                    await asyncio.sleep(5)
+                    async with s.get(
+                        RUCAPTCHA_RES,
+                        params={
+                            "key": rucaptcha_key,
+                            "action": "get",
+                            "id": task_id,
+                            "json": 1,
+                        },
+                    ) as r2:
+                        res = await r2.json(
+                            content_type=None
+                        )
+                    if res.get("status") == 1:
+                        token = res["request"]
+                        if log:
+                            log.log_captcha(
+                                "solved",
+                                attempt=attempt,
+                                token=token[:30],
+                            )
+                        return token
+                    err_code = res.get("request", "")
+                    if err_code not in (
+                        "CAPCHA_NOT_READY",
+                        "CAPTCHA_NOT_READY",
+                    ):
+                        if log:
+                            log.log_captcha(
+                                "error_poll",
+                                error=err_code or "?",
+                            )
+                        if (
+                            err_code
+                            == "ERROR_CAPTCHA_UNSOLVABLE"
+                            and solve_try + 1 < max_tries
+                        ):
+                            if log:
+                                log.log_captcha(
+                                    "retry_unsolvable",
+                                )
+                            await asyncio.sleep(3)
+                            break
+                        return None
+                else:
+                    return None
+        except Exception as e:
+            if log:
+                log.log_captcha(
+                    "exception", error=str(e)[:120],
+                )
+            return None
     return None
 
 
@@ -652,38 +706,81 @@ async def _detect_math_captcha(page):
     try:
         result = await page.evaluate(r"""() => {
             const body = document.body.innerText || '';
-            const m = body.match(
-                /(\d+)\s*([\+\-\*])\s*(\d+)\s*=\s*\?/
-            );
-            if (!m) return null;
+            const patterns = [
+                /(\d+)\s*([\+\-\*×xх])\s*(\d+)\s*=\s*\??/,
+                /сколько\s+(?:будет\s+)?(\d+)\s*([\+\-\*×xх])\s*(\d+)/i,
+                /решите[:\s]*(\d+)\s*([\+\-\*×xх])\s*(\d+)/i,
+                /введите\s+(?:результат|ответ)[:\s]*(\d+)\s*([\+\-\*×xх])\s*(\d+)/i,
+                /(\d+)\s*(плюс|минус|умножить)\s+(\d+)/i,
+                /(?:пример|задача)[:\s]*(\d+)\s*([\+\-\*×xх])\s*(\d+)/i,
+            ];
+            let a, op, b;
+            let found = false;
+            for (const pat of patterns) {
+                const m = body.match(pat);
+                if (!m) continue;
+                a = parseInt(m[1]);
+                let rawOp = m[2].toLowerCase();
+                if (rawOp === 'плюс' || rawOp === '+') op = '+';
+                else if (rawOp === 'минус' || rawOp === '-') op = '-';
+                else if (rawOp === 'умножить' || /[*×xх]/.test(rawOp)) op = '*';
+                else op = rawOp;
+                b = parseInt(m[3]);
+                found = true;
+                break;
+            }
+            if (!found) return null;
+
+            function mkSel(inp) {
+                if (inp.id) return '#' + inp.id;
+                if (inp.name)
+                    return 'input[name="'+inp.name+'"]';
+                if (inp.placeholder)
+                    return 'input[placeholder="'
+                        + inp.placeholder + '"]';
+                return null;
+            }
+            function isVis(el) {
+                try {
+                    const st = getComputedStyle(el);
+                    if (st.display === 'none'
+                        || st.visibility === 'hidden') return false;
+                    const r = el.getBoundingClientRect();
+                    return r.width > 10 && r.height > 10;
+                } catch(e) { return false; }
+            }
+            const skipRe = /phone|tel|email|имя|name|телефон|почт|фамили|отчеств|фио|comment|сообщ/i;
             const inputs = document.querySelectorAll(
                 'input[type="text"], input[type="number"], '
                 + 'input:not([type])'
             );
+            // Сначала ищем по captcha-признакам
             for (const inp of inputs) {
+                if (!isVis(inp)) continue;
                 const sig = (
                     (inp.name||'') + ' '
                     + (inp.id||'') + ' '
                     + (inp.placeholder||'') + ' '
                     + (inp.className||'')
                 ).toLowerCase();
-                if (/captcha|code|код|ответ|answer|result|math/
+                if (/captcha|code|код|ответ|answer|result|math|quiz|квиз|пример/
                     .test(sig)) {
-                    let sel = null;
-                    if (inp.id)
-                        sel = '#' + inp.id;
-                    else if (inp.name)
-                        sel = 'input[name="'+inp.name+'"]';
-                    else if (inp.placeholder)
-                        sel = 'input[placeholder="'
-                            + inp.placeholder + '"]';
-                    if (sel) return {
-                        a: parseInt(m[1]),
-                        op: m[2],
-                        b: parseInt(m[3]),
-                        sel: sel,
-                    };
+                    const sel = mkSel(inp);
+                    if (sel) return {a, op, b, sel};
                 }
+            }
+            // Fallback: любой видимый пустой input не phone/email/name
+            for (const inp of inputs) {
+                if (!isVis(inp)) continue;
+                const sig = (
+                    (inp.name||'') + ' '
+                    + (inp.id||'') + ' '
+                    + (inp.placeholder||'')
+                ).toLowerCase();
+                if (skipRe.test(sig)) continue;
+                if ((inp.value||'').trim()) continue;
+                const sel = mkSel(inp);
+                if (sel) return {a, op, b, sel};
             }
             return null;
         }""")
@@ -1050,6 +1147,1063 @@ async def _detect_icon_captcha(page, rucaptcha_key):
         return None
 
 
+async def _try_click_smartcaptcha(page):
+    """Пробует кликнуть чекбокс SmartCaptcha
+    напрямую (iframe, вложенный iframe, или DOM)."""
+    log = get_logger()
+
+    _SC_PAT = (
+        "smartcaptcha", "captcha-cloud",
+        "captcha-api", "captcha.yandex",
+        "captcha.ya.net", "tildaapi",
+    )
+    _CB_SEL = (
+        'input[type="checkbox"],'
+        '.CheckboxCaptcha-Anchor,'
+        '[class*="checkbox" i],'
+        'button[class*="check" i],'
+        '[role="checkbox"]'
+    )
+
+    # 1. Обход ВСЕХ фреймов (включая вложенные)
+    #    через page.frames — решает проблему
+    #    Tilda SmartCaptcha с вложенными iframe
+    for frame in page.frames:
+        if frame == page.main_frame:
+            continue
+        try:
+            f = frame
+            is_sc = False
+            while f and f != page.main_frame:
+                if any(
+                    p in f.url.lower() for p in _SC_PAT
+                ):
+                    is_sc = True
+                    break
+                f = f.parent_frame
+            if not is_sc:
+                try:
+                    is_sc = await frame.evaluate(
+                        r"""() => {
+                        const t = (
+                            document.body.innerText||''
+                        ).toLowerCase();
+                        return /не робот|not a robot|я не робот/
+                            .test(t);
+                    }""")
+                except Exception:
+                    pass
+            if not is_sc:
+                continue
+            cb = await frame.query_selector(_CB_SEL)
+            if cb:
+                await cb.click()
+                if log:
+                    log.log_captcha(
+                        "smartcaptcha_checkbox_click",
+                        frame_url=frame.url[:60],
+                    )
+                await asyncio.sleep(3)
+                return True
+        except Exception:
+            continue
+
+    # 2. Ищем по тексту в DOM
+    try:
+        clicked = await page.evaluate(r"""() => {
+            const all = document.querySelectorAll(
+                'input[type="checkbox"],'
+                + '[role="checkbox"],'
+                + '[class*="Checkbox" i],'
+                + '[class*="captcha" i] input');
+            for (const el of all) {
+                try {
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 5 || r.height < 5)
+                        continue;
+                    const parent = el.closest(
+                        '[class*="captcha" i],'
+                        + '[id*="captcha" i]');
+                    if (parent) {
+                        el.click();
+                        return true;
+                    }
+                } catch(e) {}
+            }
+            const caps = document.querySelectorAll(
+                '[class*="CheckboxCaptcha" i],'
+                + '[class*="smartcaptcha" i] label,'
+                + '[class*="smart-captcha" i] label');
+            for (const c of caps) {
+                try {
+                    const r = c.getBoundingClientRect();
+                    if (r.width > 10 && r.height > 10) {
+                        c.click();
+                        return true;
+                    }
+                } catch(e) {}
+            }
+            return false;
+        }""")
+        if clicked:
+            if log:
+                log.log_captcha(
+                    "smartcaptcha_dom_click",
+                )
+            await asyncio.sleep(3)
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+async def _extract_smartcaptcha_sitekey(page):
+    """Ищет sitekey SmartCaptcha в Tilda и
+    других CMS."""
+    try:
+        return await page.evaluate(r"""() => {
+            // 1. iframe src
+            for (const f of document.querySelectorAll(
+                'iframe')) {
+                const src = (f.src||'');
+                if (!/smartcaptcha|captcha-cloud|captcha-api|captcha\.yandex/i
+                    .test(src)) continue;
+                const m = src.match(
+                    /sitekey=([^&]+)/i);
+                if (m) return m[1];
+            }
+            // 2. data-sitekey
+            for (const el of document.querySelectorAll(
+                '[data-sitekey]')) {
+                const k = el.getAttribute('data-sitekey');
+                if (!k || k.startsWith('6L')) continue;
+                return k;
+            }
+            // 3. Tilda form config
+            const tForms = document.querySelectorAll(
+                '[data-tilda-captchakey]');
+            for (const f of tForms) {
+                const k = f.getAttribute(
+                    'data-tilda-captchakey');
+                if (k) return k;
+            }
+            // 4. Tilda: smartcaptcha render container
+            const scCont = document.querySelector(
+                '#smartcaptcha,'
+                + '[id*="smartcaptcha" i],'
+                + '.t-form__captcha-wrapper,'
+                + '[class*="t-captcha" i],'
+                + '[class*="captchabox" i]');
+            if (scCont) {
+                const k = scCont.getAttribute(
+                    'data-sitekey');
+                if (k) return k;
+            }
+            // 5. inline scripts
+            for (const s of document.querySelectorAll(
+                'script:not([src])')) {
+                const t = s.textContent || '';
+                if (!/captcha/i.test(t)) continue;
+                const m = t.match(
+                    /sitekey['":\s]+['"]([^'"]{10,})['"]/i);
+                if (m && !m[1].startsWith('6L'))
+                    return m[1];
+            }
+            // 6. window variables
+            try {
+                if (window.tildaForm
+                    && window.tildaForm.captchaKey)
+                    return window.tildaForm.captchaKey;
+            } catch(e) {}
+            try {
+                if (window.smartCaptcha
+                    && window.smartCaptcha._sitekey)
+                    return window.smartCaptcha._sitekey;
+            } catch(e) {}
+            // 7. script src
+            for (const s of document.querySelectorAll(
+                'script[src*="captcha" i]')) {
+                const m = (s.src||'').match(
+                    /sitekey=([^&]+)/i);
+                if (m) return m[1];
+            }
+            // 8. data-captcha-key
+            const dck = document.querySelector(
+                '[data-captcha-key]');
+            if (dck) {
+                const v = dck.getAttribute(
+                    'data-captcha-key');
+                if (v && v.length > 5
+                    && !v.startsWith('6L'))
+                    return v;
+            }
+            // 9. Tilda: form attrs with captcha
+            for (const f of document.querySelectorAll(
+                'form')) {
+                for (const attr of f.attributes) {
+                    const nm = attr.name.toLowerCase();
+                    if (!/captcha/.test(nm)) continue;
+                    const v = attr.value;
+                    if (v && v.length > 5
+                        && !v.startsWith('6L'))
+                        return v;
+                }
+            }
+            // 10. captchaKey в inline-скриптах
+            for (const s of document.querySelectorAll(
+                'script:not([src])')) {
+                const t = s.textContent || '';
+                const m = t.match(
+                    /captchaKey['":\s]+['"]([^'"]{10,})['"]/i);
+                if (m && !m[1].startsWith('6L'))
+                    return m[1];
+            }
+            // 11. SmartCaptcha render container
+            //     с data-sitekey
+            for (const el of document.querySelectorAll(
+                'div[id^="smartcaptcha"],'
+                + 'div[id^="smart-captcha"],'
+                + '[class*="smartcaptcha" i],'
+                + '[class*="smart-captcha" i],'
+                + '.t-form__captcha-wrapper')) {
+                for (const attr of el.attributes) {
+                    const v = attr.value;
+                    if (v && v.length > 10
+                        && v.length < 100
+                        && !v.startsWith('6L')
+                        && /^[a-zA-Z0-9_-]+$/
+                            .test(v))
+                        return v;
+                }
+            }
+            return null;
+        }""")
+    except Exception:
+        pass
+
+    # Fallback: ищем sitekey в URL вложенных фреймов
+    #   (page.frames обходит все уровни вложенности)
+    import re as _re
+    try:
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            url = frame.url or ""
+            if not _re.search(
+                r"smartcaptcha|captcha-cloud|"
+                r"captcha-api|captcha\.yandex",
+                url, _re.IGNORECASE,
+            ):
+                continue
+            m = _re.search(
+                r"sitekey=([^&]+)", url, _re.IGNORECASE,
+            )
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    return None
+
+
+async def _handle_tilda_needcaptcha(
+    page, page_url, rucaptcha_key,
+):
+    """Специальная обработка Tilda needcaptcha:
+    ждём popup SmartCaptcha, решаем, вызываем Tilda
+    re-submit."""
+    log = get_logger()
+
+    for wait in range(6):
+        await asyncio.sleep(2)
+        try:
+            popup_ready = await page.evaluate(r"""() => {
+                // Tilda SmartCaptcha popup
+                const sels = [
+                    '.t-form__captcha-error',
+                    '[class*="t-captcha" i]',
+                    '.t-popup[style*="display: block"]',
+                    '.t-popup[style*="display:block"]',
+                    '.t-popup.t-popup_show',
+                ];
+                for (const s of sels) {
+                    const el = document.querySelector(s);
+                    if (el) {
+                        try {
+                            const st = getComputedStyle(el);
+                            if (st.display !== 'none'
+                                && st.visibility !== 'hidden')
+                                return 'tilda_popup';
+                        } catch(e) {}
+                    }
+                }
+                // SmartCaptcha iframe
+                for (const f of document.querySelectorAll(
+                    'iframe')) {
+                    const src = (f.src||'').toLowerCase();
+                    if (/smartcaptcha|captcha-cloud|captcha-api|captcha\.yandex|captcha\.ya\.net|tildaapi/
+                        .test(src)) return 'sc_iframe';
+                }
+                // Tilda captcha box
+                const tcb = document.querySelector(
+                    '#tildaformcaptchabox,'
+                    + '#captchaIframeBox');
+                if (tcb) {
+                    try {
+                        const st = getComputedStyle(tcb);
+                        if (st.display !== 'none')
+                            return 'tilda_captchabox';
+                    } catch(e) {}
+                }
+                // SmartCaptcha render container
+                const sc = document.querySelector(
+                    'div[id^="smartcaptcha-"],'
+                    + 'div[id^="smart-captcha-"],'
+                    + '#smartcaptcha,'
+                    + '[class*="smartcaptcha" i],'
+                    + '[class*="CheckboxCaptcha" i]');
+                if (sc) return 'sc_container';
+                // Tilda text patterns
+                const body = (
+                    document.body.innerText || ''
+                ).toLowerCase();
+                if (/поставьте галочку|check the box|не робот|not a robot|smartcaptcha/i
+                    .test(body)) return 'sc_text';
+                return null;
+            }""")
+        except Exception:
+            return None
+
+        if not popup_ready:
+            continue
+
+        if log:
+            log.log_captcha(
+                "tilda_needcaptcha_detected",
+                signal=popup_ready,
+            )
+
+        clicked = await _try_click_smartcaptcha(page)
+        if clicked:
+            await asyncio.sleep(3)
+            # Проверяем решена ли капча:
+            #   checkbox checked во вложенных фреймах
+            sc_solved = False
+            for fr in page.frames:
+                if fr == page.main_frame:
+                    continue
+                try:
+                    checked = await fr.evaluate(
+                        r"""() => {
+                        const cb = document.querySelector(
+                            'input[type="checkbox"]');
+                        return cb && cb.checked;
+                    }""")
+                    if checked:
+                        sc_solved = True
+                        break
+                except Exception:
+                    continue
+            still = not sc_solved
+            if still:
+                still = await page.evaluate(r"""() => {
+                    for (const f of document
+                        .querySelectorAll('iframe')) {
+                        const src = (
+                            f.src||''
+                        ).toLowerCase();
+                        if (/smartcaptcha|captcha-cloud|tildaapi/
+                            .test(src)) {
+                            const r = f
+                                .getBoundingClientRect();
+                            if (r.width > 50
+                                && r.height > 30)
+                                return true;
+                        }
+                    }
+                    // Tilda captcha box
+                    const tcb = document.querySelector(
+                        '#tildaformcaptchabox');
+                    if (tcb) {
+                        try {
+                            const st = getComputedStyle(
+                                tcb);
+                            if (st.display !== 'none')
+                                return true;
+                        } catch(e) {}
+                    }
+                    return false;
+                }""")
+            if not still:
+                if log:
+                    log.log_captcha(
+                        "tilda_sc_click_passed",
+                    )
+                # Tilda auto-resubmits after checkbox,
+                # then shows success, then may redirect
+                orig_base = page_url.split('#')[0] \
+                    .split('?')[0].rstrip('/')
+                for _aw in range(3):
+                    await asyncio.sleep(2)
+                    # Check 1: page redirected
+                    try:
+                        cur = page.url.split('#')[0] \
+                            .split('?')[0].rstrip('/')
+                        if cur != orig_base:
+                            if log:
+                                log.log_captcha(
+                                    "tilda_auto_resubmitted",
+                                    redirect=page.url[:60],
+                                )
+                            return "tilda_auto_submitted"
+                    except Exception:
+                        return "tilda_auto_submitted"
+                    # Check 2: Tilda success box visible
+                    try:
+                        has_suc = await page.evaluate(
+                            r"""() => {
+                            const sbs = document
+                                .querySelectorAll(
+                                '.t-form__successbox');
+                            for (const sb of sbs) {
+                                try {
+                                    const st =
+                                        getComputedStyle(sb);
+                                    if (st.display !== 'none')
+                                        return true;
+                                } catch(e) {}
+                            }
+                            const cb = document.querySelector(
+                                '#tildaformcaptchabox');
+                            if (cb) {
+                                try {
+                                    const st =
+                                        getComputedStyle(cb);
+                                    if (st.display === 'none')
+                                        return true;
+                                } catch(e) {}
+                            }
+                            return false;
+                        }""")
+                        if has_suc:
+                            if log:
+                                log.log_captcha(
+                                    "tilda_auto_resubmitted",
+                                    signal="success_text",
+                                )
+                            return "tilda_auto_submitted"
+                    except Exception:
+                        return "tilda_auto_submitted"
+                    # Check 3: XHR has OK response
+                    try:
+                        auto_ok = await page.evaluate(
+                            r"""() => {
+                            const xhr =
+                                window.__fbXHR || [];
+                            for (const e of xhr) {
+                                const b = (e.b || '');
+                                if (/"message"\s*:\s*"OK"/i
+                                    .test(b)) return true;
+                                if (e.s >= 200
+                                    && e.s < 300
+                                    && /"ok"/i.test(b)
+                                    && !/needcaptcha/i
+                                        .test(b))
+                                    return true;
+                            }
+                            return false;
+                        }""")
+                        if auto_ok:
+                            if log:
+                                log.log_captcha(
+                                    "tilda_auto_resubmitted",
+                                    signal="xhr_ok",
+                                )
+                            return "tilda_auto_submitted"
+                    except Exception:
+                        pass
+                # Fallback: Tilda didn't auto-submit
+                try:
+                    await page.evaluate(r"""() => {
+                        const btn = document.querySelector(
+                            'button[type="submit"].t-submit,'
+                            + '.t-form__submit button,'
+                            + 'button.t-submit');
+                        if (btn) btn.click();
+                    }""")
+                except Exception:
+                    pass
+                return "ok"
+
+        if not rucaptcha_key:
+            if log:
+                log.log_captcha(
+                    "tilda_no_rucaptcha_key",
+                )
+            return None
+
+        sitekey = await _extract_smartcaptcha_sitekey(
+            page,
+        )
+        if not sitekey:
+            # Tilda-specific: из data-tilda-captchakey
+            try:
+                sitekey = await page.evaluate(r"""() => {
+                    const el = document.querySelector(
+                        '[data-tilda-captchakey]');
+                    if (el) return el.getAttribute(
+                        'data-tilda-captchakey');
+                    // Tilda stores captcha key on the form
+                    const forms = document.querySelectorAll(
+                        'form[data-tilda-req],'
+                        + 'form.t-form');
+                    for (const f of forms) {
+                        for (const attr of f.attributes) {
+                            if (/captcha/i.test(attr.name)
+                                && attr.value.length > 8)
+                                return attr.value;
+                        }
+                    }
+                    return null;
+                }""")
+            except Exception:
+                pass
+
+        if not sitekey:
+            if log:
+                log.log_captcha(
+                    "tilda_no_sitekey",
+                )
+            return None
+
+        if log:
+            log.log_captcha(
+                "tilda_sitekey_found",
+                sitekey=sitekey[:20],
+            )
+
+        token = await _solve_captcha(
+            "yandex", sitekey,
+            page_url, rucaptcha_key,
+        )
+        if not token:
+            return "solve_failed"
+
+        # Inject token into Tilda's form
+        try:
+            await page.evaluate(r"""t => {
+                // Standard SmartCaptcha hidden inputs
+                const inps = document.querySelectorAll(
+                    'input[name="smart-token"],'
+                    + 'input[name="smartCaptchaToken"],'
+                    + '[name*="captcha-token" i],'
+                    + '[name*="captcha" i][type="hidden"]');
+                for (const i of inps) i.value = t;
+                // Tilda: hidden input in active form
+                const forms = document.querySelectorAll(
+                    'form.t-form');
+                for (const f of forms) {
+                    let inp = f.querySelector(
+                        'input[name="smart-token"]');
+                    if (!inp) {
+                        inp = document.createElement('input');
+                        inp.type = 'hidden';
+                        inp.name = 'smart-token';
+                        f.appendChild(inp);
+                    }
+                    inp.value = t;
+                }
+                // SmartCaptcha callback
+                if (window.smartCaptcha) {
+                    try { window.smartCaptcha.execute(); }
+                    catch(e) {}
+                }
+            }""", token)
+        except Exception:
+            pass
+
+        if log:
+            log.log_captcha(
+                "tilda_token_injected",
+                token=token[:30],
+            )
+
+        # Tilda: trigger form re-submit
+        try:
+            await page.evaluate(r"""() => {
+                const btn = document.querySelector(
+                    'button[type="submit"].t-submit,'
+                    + '.t-form__submit button,'
+                    + 'button.t-submit');
+                if (btn) btn.click();
+            }""")
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+        return "ok"
+
+    if not rucaptcha_key:
+        if log:
+            log.log_captcha(
+                "tilda_nc_no_popup_no_key",
+            )
+        return None
+
+    if log:
+        log.log_captcha(
+            "tilda_nc_no_popup_fallback",
+        )
+
+    sitekey = await _extract_smartcaptcha_sitekey(
+        page,
+    )
+    if not sitekey:
+        try:
+            sitekey = await page.evaluate(r"""() => {
+                // data-tilda-captchakey
+                const el = document.querySelector(
+                    '[data-tilda-captchakey]');
+                if (el) return el.getAttribute(
+                    'data-tilda-captchakey');
+                // form attributes with captcha
+                const forms = document.querySelectorAll(
+                    'form[data-tilda-req],'
+                    + 'form.t-form');
+                for (const f of forms) {
+                    for (const attr of f.attributes) {
+                        if (/captcha/i.test(attr.name)
+                            && attr.value.length > 8)
+                            return attr.value;
+                    }
+                }
+                // Tilda global
+                try {
+                    if (window.tildaForm
+                        && window.tildaForm.captchaKey)
+                        return window.tildaForm.captchaKey;
+                } catch(e) {}
+                // data-captcha-key
+                const ck = document.querySelector(
+                    '[data-captcha-key]');
+                if (ck) {
+                    const v = ck.getAttribute(
+                        'data-captcha-key');
+                    if (v && v.length > 5)
+                        return v;
+                }
+                // SmartCaptcha script src
+                for (const s of document.querySelectorAll(
+                    'script[src]')) {
+                    const src = s.src || '';
+                    if (!/captcha/i.test(src))
+                        continue;
+                    const m = src.match(
+                        /sitekey=([^&]+)/i);
+                    if (m) return m[1];
+                }
+                // Inline script: sitekey
+                for (const s of document.querySelectorAll(
+                    'script:not([src])')) {
+                    const t = s.textContent || '';
+                    if (!/captcha/i.test(t))
+                        continue;
+                    const m = t.match(
+                        /sitekey['":\s]+['"]([^'"]{10,})['"]/i);
+                    if (m && !m[1].startsWith('6L'))
+                        return m[1];
+                    const m2 = t.match(
+                        /captchaKey['":\s]+['"]([^'"]{10,})['"]/i);
+                    if (m2 && !m2[1].startsWith('6L'))
+                        return m2[1];
+                }
+                return null;
+            }""")
+        except Exception:
+            pass
+
+    if not sitekey:
+        if log:
+            log.log_captcha(
+                "tilda_nc_fallback_no_sitekey",
+            )
+        return None
+
+    if log:
+        log.log_captcha(
+            "tilda_nc_fallback_sitekey",
+            sitekey=sitekey[:20],
+        )
+
+    token = await _solve_captcha(
+        "yandex", sitekey,
+        page_url, rucaptcha_key,
+    )
+    if not token:
+        return "solve_failed"
+
+    try:
+        await page.evaluate(r"""t => {
+            const inps = document.querySelectorAll(
+                'input[name="smart-token"],'
+                + 'input[name="smartCaptchaToken"],'
+                + '[name*="captcha-token" i],'
+                + '[name*="captcha" i][type="hidden"]');
+            for (const i of inps) i.value = t;
+            const forms = document.querySelectorAll(
+                'form.t-form');
+            for (const f of forms) {
+                let inp = f.querySelector(
+                    'input[name="smart-token"]');
+                if (!inp) {
+                    inp = document.createElement('input');
+                    inp.type = 'hidden';
+                    inp.name = 'smart-token';
+                    f.appendChild(inp);
+                }
+                inp.value = t;
+            }
+            if (window.smartCaptcha) {
+                try { window.smartCaptcha.execute(); }
+                catch(e) {}
+            }
+        }""", token)
+    except Exception:
+        pass
+
+    try:
+        await page.evaluate(r"""() => {
+            const btn = document.querySelector(
+                'button[type="submit"].t-submit,'
+                + '.t-form__submit button,'
+                + 'button.t-submit');
+            if (btn) btn.click();
+        }""")
+    except Exception:
+        pass
+
+    if log:
+        log.log_captcha(
+            "tilda_nc_fallback_injected",
+            token=token[:30],
+        )
+
+    await asyncio.sleep(2)
+    return "ok"
+
+
+async def handle_post_submit_captcha(
+    page, page_url, rucaptcha_key,
+):
+    """Обработка капчи, появляющейся ПОСЛЕ submit.
+    Ждёт появления виджета SmartCaptcha/reCAPTCHA,
+    math-квиза и т.д."""
+    log = get_logger()
+
+    for wait_round in range(8):
+        await asyncio.sleep(2.5 if wait_round < 3 else 2)
+
+        try:
+            _ = await page.evaluate("() => 1")
+        except Exception:
+            if log:
+                log.log_captcha(
+                    "post_submit_page_lost",
+                )
+            return None
+
+        math_res = await _detect_math_captcha(page)
+        if math_res == "ok":
+            return "ok"
+
+        # SmartCaptcha: сначала кликаем чекбокс
+        has_sc = await page.evaluate(r"""() => {
+            const body = (
+                document.body.innerText || ''
+            ).toLowerCase();
+            if (/i.m not a robot|not a robot|press to continue|smartcaptcha|не робот|поставьте галочку|check the box|let us know you.re human|нажмите.{0,5}чтобы продолжить|я не робот/i
+                .test(body)) return true;
+            for (const f of document.querySelectorAll(
+                'iframe')) {
+                const src = (f.src||'').toLowerCase();
+                if (/smartcaptcha|captcha-cloud|captcha-api|captcha\.yandex|captcha\.ya\.net|tildaapi/
+                    .test(src)) return true;
+            }
+            const sc = document.querySelector(
+                '[class*="smartcaptcha" i],'
+                + '[class*="smart-captcha" i],'
+                + '#smartcaptcha,'
+                + '[class*="CheckboxCaptcha" i],'
+                + '.t-form__captcha-wrapper,'
+                + '[class*="captchabox" i],'
+                + '#tildaformcaptchabox,'
+                + '#captchaIframeBox,'
+                + '.t-form__captcha-error,'
+                + '[class*="t-captcha" i],'
+                + '[data-tilda-captchakey],'
+                + '.t-popup[style*="display: block"],'
+                + '.t-popup[style*="display:block"],'
+                + '.t-popup.t-popup_show');
+            if (sc) return true;
+            // Tilda: SmartCaptcha render container
+            if (document.querySelector(
+                'div[id^="smartcaptcha-"],'
+                + 'div[id^="smart-captcha-"],'
+                + '[data-captcha-key]'))
+                return true;
+            // Tilda: SmartCaptcha script loaded
+            if (document.querySelector(
+                'script[src*="smartcaptcha" i],'
+                + 'script[src*="captcha-api" i],'
+                + 'script[src*="captcha.yandex" i]'))
+                return true;
+            return false;
+        }""")
+
+        if has_sc:
+            if log:
+                log.log_captcha(
+                    "post_submit_smartcaptcha_detected",
+                )
+            clicked = await _try_click_smartcaptcha(
+                page,
+            )
+            if clicked:
+                await asyncio.sleep(2)
+                # Проверяем: капча исчезла?
+                # Проверяем и body, и iframe src
+                still = await page.evaluate(r"""() => {
+                    for (const f of document
+                        .querySelectorAll('iframe')) {
+                        const src = (
+                            f.src||''
+                        ).toLowerCase();
+                        if (/smartcaptcha|captcha-cloud|captcha-api|captcha\.yandex|tildaapi/
+                            .test(src)) {
+                            const r = f
+                                .getBoundingClientRect();
+                            if (r.width > 50
+                                && r.height > 30)
+                                return true;
+                        }
+                    }
+                    // Tilda captcha box
+                    const tcb = document.querySelector(
+                        '#tildaformcaptchabox');
+                    if (tcb) {
+                        try {
+                            const st = getComputedStyle(tcb);
+                            if (st.display !== 'none')
+                                return true;
+                        } catch(e) {}
+                    }
+                    const body = (
+                        document.body.innerText||''
+                    ).toLowerCase();
+                    return /i.m not a robot|press to continue|smartcaptcha/i
+                        .test(body);
+                }""")
+                # Дополнительно: есть ли ещё
+                #   непрочеканный checkbox во фреймах
+                if still:
+                    sc_gone = False
+                    for fr in page.frames:
+                        if fr == page.main_frame:
+                            continue
+                        try:
+                            checked = await fr.evaluate(
+                                r"""() => {
+                                const cb = document
+                                    .querySelector(
+                                    'input[type="checkbox"]');
+                                return cb && cb.checked;
+                            }""")
+                            if checked:
+                                sc_gone = True
+                                break
+                        except Exception:
+                            continue
+                    if sc_gone:
+                        still = False
+                if not still:
+                    if log:
+                        log.log_captcha(
+                            "smartcaptcha_click_passed",
+                        )
+                    orig_b = page_url.split('#')[0] \
+                        .split('?')[0].rstrip('/')
+                    for _aw in range(3):
+                        await asyncio.sleep(2)
+                        try:
+                            cur = page.url.split('#')[0] \
+                                .split('?')[0].rstrip('/')
+                            if cur != orig_b:
+                                if log:
+                                    log.log_captcha(
+                                        "tilda_auto_resubmitted",
+                                        redirect=page.url[:60],
+                                    )
+                                return "tilda_auto_submitted"
+                        except Exception:
+                            return "tilda_auto_submitted"
+                        try:
+                            has_s = await page.evaluate(
+                                r"""() => {
+                                const sbs = document
+                                    .querySelectorAll(
+                                    '.t-form__successbox');
+                                for (const sb of sbs) {
+                                    try {
+                                        const st =
+                                            getComputedStyle(sb);
+                                        if (st.display !== 'none')
+                                            return true;
+                                    } catch(e) {}
+                                }
+                                const cb = document.querySelector(
+                                    '#tildaformcaptchabox');
+                                if (cb) {
+                                    try {
+                                        const st =
+                                            getComputedStyle(cb);
+                                        if (st.display === 'none')
+                                            return true;
+                                    } catch(e) {}
+                                }
+                                return false;
+                            }""")
+                            if has_s:
+                                if log:
+                                    log.log_captcha(
+                                        "tilda_auto_resubmitted",
+                                        signal="success_text",
+                                    )
+                                return "tilda_auto_submitted"
+                        except Exception:
+                            return "tilda_auto_submitted"
+                        try:
+                            auto_ok = await page.evaluate(
+                                r"""() => {
+                                const xhr =
+                                    window.__fbXHR || [];
+                                for (const e of xhr) {
+                                    const b = (e.b || '');
+                                    if (/"message"\s*:\s*"OK"/i
+                                        .test(b)) return true;
+                                    if (e.s >= 200
+                                        && e.s < 300
+                                        && /"ok"/i.test(b)
+                                        && !/needcaptcha/i
+                                            .test(b))
+                                        return true;
+                                }
+                                return false;
+                            }""")
+                            if auto_ok:
+                                if log:
+                                    log.log_captcha(
+                                        "tilda_auto_resubmitted",
+                                        signal="xhr_ok",
+                                    )
+                                return "tilda_auto_submitted"
+                        except Exception:
+                            pass
+                    return "ok"
+                if log:
+                    log.log_captcha(
+                        "smartcaptcha_click_challenge",
+                    )
+
+            # Клик не помог — решаем через API
+            if rucaptcha_key:
+                sitekey = (
+                    await _extract_smartcaptcha_sitekey(
+                        page,
+                    )
+                )
+                if sitekey:
+                    if log:
+                        log.log_captcha(
+                            "post_submit_sitekey",
+                            sitekey=sitekey[:20],
+                        )
+                    token = await _solve_captcha(
+                        "yandex", sitekey,
+                        page_url, rucaptcha_key,
+                    )
+                    if token:
+                        ok = await _inject_captcha_token(
+                            page, "yandex", token,
+                        )
+                        if ok:
+                            try:
+                                await page.evaluate(
+                                    r"""t => {
+                                    const inps = document
+                                        .querySelectorAll(
+                                        'input[name="smart-token"],'
+                                        + '[name*="captcha" i]'
+                                        + '[type="hidden"]');
+                                    for (const i of inps)
+                                        i.value = t;
+                                    if (window.smartCaptcha)
+                                        try { window.smartCaptcha
+                                            .execute(); }
+                                        catch(e) {}
+                                }""", token)
+                            except Exception:
+                                pass
+                            return "ok"
+                        return "inject_failed"
+                    return "solve_failed"
+                else:
+                    if log:
+                        log.log_captcha(
+                            "post_submit_no_sitekey",
+                        )
+
+            return None
+
+        # Не SmartCaptcha: ищем reCAPTCHA/hCaptcha
+        if rucaptcha_key:
+            info = await _get_sitekey(page)
+            if info and info.get("key"):
+                ctype = info["type"]
+                skey = info["key"]
+                if log:
+                    log.log_captcha(
+                        "post_submit_found",
+                        type=ctype,
+                        sitekey=skey[:20],
+                    )
+                token = await _solve_captcha(
+                    ctype, skey,
+                    page_url, rucaptcha_key,
+                    enterprise=info.get(
+                        "enterprise", False
+                    ),
+                )
+                if not token:
+                    return "solve_failed"
+                ok = await _inject_captcha_token(
+                    page, ctype, token,
+                )
+                return "ok" if ok else "inject_failed"
+
+        slider_res = await _detect_slider_captcha(
+            page, rucaptcha_key,
+        )
+        if slider_res == "ok":
+            return "ok"
+
+        img_res = await _detect_image_captcha(
+            page, rucaptcha_key,
+        )
+        if img_res == "ok":
+            return "ok"
+
+    return None
+
+
 async def detect_captcha_overlay(page) -> str:
     """Обнаруживает полноэкранные капча-оверлеи.
     Возвращает тип капчи или пустую строку."""
@@ -1063,8 +2217,10 @@ async def detect_captcha_overlay(page) -> str:
             const ySC = document.querySelector(
                 '[class*="smart-captcha" i],'
                 + '#smartcaptcha,'
+                + '#tildaformcaptchabox,'
                 + 'iframe[src*="smartcaptcha" i],'
-                + 'iframe[src*="captcha-cloud" i]'
+                + 'iframe[src*="captcha-cloud" i],'
+                + 'iframe[src*="tildaapi" i]'
             );
             if (ySC) {
                 try {
@@ -1158,6 +2314,27 @@ async def handle_captcha(
 
     # 3. Sitekey-капчи (reCAPTCHA, hCaptcha, etc.)
     info = await _get_sitekey(page)
+
+    if not info and has_captcha_hint:
+        for _wait in range(3):
+            await asyncio.sleep(1.5)
+            info = await _get_sitekey(page)
+            if info:
+                break
+        if not info:
+            try:
+                has_recaptcha_iframe = await page.evaluate(
+                    r"""() => !!document.querySelector(
+                        'iframe[src*="recaptcha"],'
+                        + 'iframe[src*="hcaptcha"],'
+                        + 'div.g-recaptcha,'
+                        + 'div.h-captcha'
+                    )""")
+                if has_recaptcha_iframe:
+                    await asyncio.sleep(2)
+                    info = await _get_sitekey(page)
+            except Exception:
+                pass
 
     if not info:
         # 4. SmartCaptcha overlay (без sitekey в DOM)

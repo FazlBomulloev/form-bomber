@@ -502,16 +502,41 @@ async def extract_forms(page) -> tuple:
                     "trigger_click",
                     f"П{priority}: «{text[:30]}»",
                 )
+            pages_before = len(
+                page.context.pages
+            )
             await el.click(timeout=5000)
+            await asyncio.sleep(0.5)
+
+            new_tab = None
+            if len(page.context.pages) > pages_before:
+                new_tab = page.context.pages[-1]
+                if log:
+                    log.step(
+                        "new_tab",
+                        f"кнопка открыла новую вкладку",
+                    )
+                try:
+                    await new_tab.wait_for_load_state(
+                        "domcontentloaded",
+                        timeout=10000,
+                    )
+                except Exception:
+                    pass
+
+            search_page = new_tab or page
+
             appeared = (
                 await _wait_form_after_trigger(
-                    page, timeout=8000,
+                    search_page, timeout=8000,
                 )
             )
             if appeared:
                 await asyncio.sleep(0.5)
                 form_json = (
-                    await extract_form_json(page)
+                    await extract_form_json(
+                        search_page,
+                    )
                 )
                 if (
                     form_json
@@ -529,16 +554,31 @@ async def extract_forms(page) -> tuple:
                                 f"{len(form_json['fields'])}"
                                 f" полей"
                             )
+                        ctx_src = "trigger"
+                        frame = None
+                        if new_tab:
+                            ctx_src = "trigger_new_tab"
+                            frame = new_tab
                         return form_json, FormContext(
                             html="",
-                            source="trigger",
+                            source=ctx_src,
                             trigger_text=text[:50],
+                            frame=frame,
                         )
-            try:
-                await page.keyboard.press('Escape')
-                await asyncio.sleep(0.4)
-            except Exception:
-                pass
+
+            if new_tab:
+                try:
+                    await new_tab.close()
+                except Exception:
+                    pass
+            else:
+                try:
+                    await page.keyboard.press(
+                        'Escape',
+                    )
+                    await asyncio.sleep(0.4)
+                except Exception:
+                    pass
         except Exception:
             continue
 

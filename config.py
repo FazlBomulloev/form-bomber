@@ -80,7 +80,7 @@ PHONE_FALLBACKS = [
 ]
 
 WIDGET_BLACKLIST_RE = (
-    r"calltouch|callbackhunter|envybox|comagic"
+    r"callbackhunter|envybox|comagic"
     r"|mango|uiscom|roistat|marquiz|jivosite"
     r"|jivo|chatra|verbox|redconnect|callibri"
     r"|livechat|pozvonim|callkeeper"
@@ -134,6 +134,10 @@ ERROR_PHRASES = [
     "содержат ошибочные данные",
     "слишком большой объём",
     "нужно дать согласие", "ошибочка вышла",
+    "ошибка отправления",
+    "отправление не удалось",
+    "слишком много запросов",
+    "too many requests",
 ]
 
 COOKIE_BTN_TEXTS = [

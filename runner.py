@@ -24,8 +24,9 @@ from form_filler import (
 from captcha import handle_captcha, detect_captcha_overlay
 from browser_utils import (
     dismiss_cookie_banners, suppress_widgets,
-    step_shot,
+    has_calltouch, step_shot,
 )
+from calltouch import try_calltouch
 
 _ai_sem = asyncio.Semaphore(AI_CONCURRENCY)
 _ws_clients: set = set()
@@ -265,6 +266,86 @@ async def check_site_v2(
             except Exception:
                 pass
             await dismiss_cookie_banners(page)
+
+            # ── Решаем captcha overlay до поиска формы
+            pre_cap = await detect_captcha_overlay(page)
+            if pre_cap:
+                _logger.warn(
+                    f"captcha overlay при загрузке: "
+                    f"{pre_cap}"
+                )
+                from captcha import (
+                    _try_click_smartcaptcha,
+                    _solve_smartcaptcha_overlay,
+                    _extract_smartcaptcha_sitekey,
+                    _solve_captcha,
+                    _inject_captcha_token,
+                )
+                cap_solved = False
+                # Попробуем кликнуть чекбокс
+                clicked = (
+                    await _try_click_smartcaptcha(page)
+                )
+                if clicked:
+                    await asyncio.sleep(3)
+                    still = (
+                        await detect_captcha_overlay(page)
+                    )
+                    if not still:
+                        cap_solved = True
+                        _logger.ok(
+                            "captcha overlay: клик помог"
+                        )
+                if not cap_solved and rucaptcha_key:
+                    sc_res = (
+                        await _solve_smartcaptcha_overlay(
+                            page, url, rucaptcha_key,
+                        )
+                    )
+                    if sc_res == "ok":
+                        cap_solved = True
+                        _logger.ok(
+                            "captcha overlay решена API"
+                        )
+                    else:
+                        sitekey = (
+                            await
+                            _extract_smartcaptcha_sitekey(
+                                page,
+                            )
+                        )
+                        if sitekey:
+                            token = await _solve_captcha(
+                                "yandex", sitekey,
+                                url, rucaptcha_key,
+                            )
+                            if token:
+                                ok = (
+                                    await
+                                    _inject_captcha_token(
+                                        page, "yandex",
+                                        token,
+                                    )
+                                )
+                                if ok:
+                                    cap_solved = True
+                                    _logger.ok(
+                                        "captcha overlay "
+                                        "решена yandex API"
+                                    )
+                if cap_solved:
+                    await asyncio.sleep(2)
+                    try:
+                        await page.reload(
+                            wait_until=(
+                                "domcontentloaded"
+                            ),
+                            timeout=15000,
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(2)
+
             await step_shot(
                 page, "01_loaded", step_dir
             )
@@ -274,7 +355,11 @@ async def check_site_v2(
             form_json, form_ctx = (
                 await extract_forms(page)
             )
-            await suppress_widgets(page)
+            has_ct = await has_calltouch(page)
+            keep_ct = not form_json and has_ct
+            await suppress_widgets(
+                page, keep_calltouch=keep_ct,
+            )
             await step_shot(
                 page, "02_form_found", step_dir
             )
@@ -417,6 +502,21 @@ async def check_site_v2(
                 )
                 result["reason_code"] = "no_form"
 
+            # ── Calltouch fallback ─────────────
+            if (
+                result["status"] != "success"
+                and keep_ct
+            ):
+                _logger.step(
+                    "calltouch",
+                    "форм нет, пробуем Calltouch API",
+                )
+                ct_result = await try_calltouch(
+                    page, phone, firstname,
+                )
+                if ct_result:
+                    result.update(ct_result)
+
             # ── Проверка captcha overlay ───────
             if result["status"] not in (
                 "success", "captcha",
@@ -428,15 +528,85 @@ async def check_site_v2(
                     _logger.warn(
                         f"captcha overlay: {cap_type}"
                     )
-                    result.update({
-                        "status": "captcha",
-                        "method": "captcha_overlay",
-                        "message": (
-                            f"Капча-оверлей: "
-                            f"{cap_type}"
-                        ),
-                        "reason_code": "captcha",
-                    })
+                    # Пробуем решить overlay
+                    from captcha import (
+                        _try_click_smartcaptcha
+                        as _tcs_final,
+                        _solve_smartcaptcha_overlay
+                        as _sso_final,
+                        _detect_image_captcha
+                        as _dic_final,
+                    )
+                    final_solved = False
+                    if cap_type in (
+                        "yandex_smartcaptcha",
+                        "captcha_overlay",
+                    ):
+                        try:
+                            cl = await _tcs_final(page)
+                            if cl:
+                                await asyncio.sleep(3)
+                                st = (
+                                    await
+                                    detect_captcha_overlay(
+                                        page
+                                    )
+                                )
+                                if not st:
+                                    final_solved = True
+                        except Exception:
+                            pass
+                        if (
+                            not final_solved
+                            and rucaptcha_key
+                        ):
+                            try:
+                                r = await _sso_final(
+                                    page, url,
+                                    rucaptcha_key,
+                                )
+                                if r == "ok":
+                                    final_solved = True
+                            except Exception:
+                                pass
+                    elif (
+                        cap_type == "image_captcha"
+                        and rucaptcha_key
+                    ):
+                        try:
+                            r = await _dic_final(
+                                page, rucaptcha_key,
+                            )
+                            if r == "ok":
+                                final_solved = True
+                        except Exception:
+                            pass
+                    if final_solved:
+                        _logger.ok(
+                            "captcha overlay решена "
+                            "в финале"
+                        )
+                        result.update({
+                            "status": "uncertain",
+                            "method": (
+                                "captcha_overlay"
+                                "_solved"
+                            ),
+                            "message": (
+                                "Капча-оверлей "
+                                "решена"
+                            ),
+                        })
+                    else:
+                        result.update({
+                            "status": "captcha",
+                            "method": "captcha_overlay",
+                            "message": (
+                                f"Капча-оверлей: "
+                                f"{cap_type}"
+                            ),
+                            "reason_code": "captcha",
+                        })
 
             # ── Финальный статус ────────────────
             if result["status"] not in (
