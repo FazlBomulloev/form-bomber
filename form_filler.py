@@ -272,8 +272,56 @@ async def _select_country_code_7(page, phone_el):
                 }
             }
 
-            // 2. Tilda phone mask — скрытый select
-            //    или data-phonemask-code
+            // 2a. Tilda phonemask виджет —
+            //     кастомный div с API
+            const pm = el.closest(
+                '.t-input-phonemask__wrap'
+            ) || el.closest('.t-input-block');
+            if (pm) {
+                const curCode =
+                    el.getAttribute(
+                        'data-phonemask-code'
+                    )
+                    || pm.getAttribute(
+                        'data-phonemask-code'
+                    )
+                    || (pm.querySelector(
+                        '[data-phonemask-code]'
+                    ) || {}).getAttribute?.(
+                        'data-phonemask-code'
+                    )
+                    || '';
+                if (curCode === '+7')
+                    return 'tilda_api:already_+7';
+                if (typeof
+                    t_form_phonemask__handleUpdateCountry
+                        === 'function') {
+                    t_form_phonemask__handleUpdateCountry(
+                        pm, {
+                            code: '+7',
+                            mask: '+7(000) 000-00-00',
+                            iso: 'ru',
+                            silent: false,
+                            noFocus: false
+                        }
+                    );
+                    el.value = '';
+                    return 'tilda_api:+7';
+                }
+                // fallback: клик на флаг + выбор RU
+                const flagEl = pm.querySelector(
+                    '.t-input-phonemask__select-flag,'
+                    + '.t-input-phonemask__flag,'
+                    + '[class*="phonemask__flag"],'
+                    + '[class*="phonemask__select"]'
+                );
+                if (flagEl) {
+                    flagEl.click();
+                    return 'tilda_flag_clicked';
+                }
+            }
+
+            // 2b. Tilda phone mask — скрытый select
             const tildaSel = form.querySelector(
                 'select.t-sel-phonemask,'
                 + 'select[class*="phonemask" i],'
@@ -325,6 +373,39 @@ async def _select_country_code_7(page, phone_el):
 
             return false;
         }""", phone_el)
+
+        if changed == 'tilda_flag_clicked':
+            await asyncio.sleep(0.5)
+            ru_item = await page.query_selector(
+                '.t-input-phonemask__country-item'
+                '[data-phonemask-code="+7"],'
+                '.t-input-phonemask__country-item'
+                '[data-code="+7"],'
+                '[data-phonemask-code="+7"],'
+                '[data-code="7"],'
+                '[data-country-code="ru"]'
+            )
+            if ru_item:
+                await ru_item.click()
+                await asyncio.sleep(0.3)
+            else:
+                try:
+                    items = await page.query_selector_all(
+                        '.t-input-phonemask__country-item,'
+                        '[class*="phonemask__country"]'
+                    )
+                    for item in items:
+                        txt = await page.evaluate(
+                            "el => el.textContent||''",
+                            item,
+                        )
+                        if '+7' in txt or 'Россия' in txt \
+                                or 'Russia' in txt:
+                            await item.click()
+                            break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.3)
 
         if changed == 'iti_opened':
             await asyncio.sleep(0.5)
@@ -431,6 +512,79 @@ async def smart_phone_fill(
         ) or ""
         digits = re.sub(r'[^\d]', '', final)
         ok = len(digits) >= 10
+
+        if not ok:
+            # retry: маска с иностранным кодом —
+            # пробуем сменить код через UI клик
+            switched = await page.evaluate(r"""el => {
+                const pm = el.closest(
+                    '.t-input-phonemask__wrap'
+                ) || el.closest('.t-input-block');
+                if (!pm) return false;
+                const flag = pm.querySelector(
+                    '.t-input-phonemask__select-flag,'
+                    + '[class*="phonemask__flag"],'
+                    + '[class*="phonemask__select"]'
+                );
+                if (flag) { flag.click(); return true; }
+                return false;
+            }""", el)
+            if switched:
+                await asyncio.sleep(0.5)
+                ru_item = await page.query_selector(
+                    '[data-phonemask-code="+7"],'
+                    '[data-code="+7"],'
+                    '[data-country-code="ru"]'
+                )
+                if not ru_item:
+                    items = await page.query_selector_all(
+                        '.t-input-phonemask__country-item,'
+                        '[class*="phonemask__country"]'
+                    )
+                    for item in items:
+                        txt = await page.evaluate(
+                            "el => el.textContent||''",
+                            item,
+                        )
+                        if '+7' in txt or 'Russia' in txt:
+                            ru_item = item
+                            break
+                if ru_item:
+                    try:
+                        await ru_item.click(
+                            timeout=3000
+                        )
+                    except Exception:
+                        pass
+                    else:
+                        await asyncio.sleep(0.5)
+                        try:
+                            await el.click(timeout=1000)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(0.2)
+                        try:
+                            await kb.press("Control+a")
+                            await asyncio.sleep(0.05)
+                            await kb.press("Backspace")
+                            await asyncio.sleep(0.1)
+                            await kb.type(
+                                phone_short, delay=50
+                            )
+                        except Exception:
+                            await _slow_type(
+                                page, el,
+                                phone_short, 50
+                            )
+                        await asyncio.sleep(0.3)
+                        final = await page.evaluate(
+                            "el => el.value || ''", el
+                        ) or ""
+                        digits = re.sub(
+                            r'[^\d]', '', final
+                        )
+                        ok = len(digits) >= 10
+
         if log:
             log.log_action(
                 "phone(tilda)", sel, final[:30],

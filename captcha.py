@@ -448,7 +448,7 @@ async def _detect_slider_captcha(page, rucaptcha_key):
 
 async def _solve_captcha(
     captcha_type, sitekey, page_url, rucaptcha_key,
-    enterprise=False, max_tries=2,
+    enterprise=False, max_tries=4,
 ):
     log = get_logger()
     if not rucaptcha_key or not sitekey:
@@ -858,6 +858,27 @@ async def _detect_image_captcha(page, rucaptcha_key):
                 return null;
             }
 
+            // findCaptchaInput: ищет input для captcha
+            // по name/id/class, содержащим "captcha"/"cap"
+            function findCaptchaInput(ctx) {
+                if (!ctx) return null;
+                const sels = [
+                    'input[name*="captcha" i]',
+                    'input[id*="captcha" i]',
+                    'input[class*="captcha" i]',
+                    'input[name="cap"]',
+                    'input[name*="capcha" i]',
+                    'input[name*="verify" i]',
+                    'input[name*="security_code" i]',
+                ];
+                for (const s of sels) {
+                    const inp = ctx.querySelector(s);
+                    if (inp && inp.type !== 'hidden')
+                        return inp;
+                }
+                return null;
+            }
+
             // Стратегия 1: img с captcha в атрибутах
             const imgs =
                 document.querySelectorAll('img');
@@ -876,8 +897,20 @@ async def _detect_image_captcha(page, rucaptcha_key):
                 const p = img.parentElement;
                 const pp = p ? p.parentElement : null;
                 const ppp = pp ? pp.parentElement : null;
-                const inp = findInput(p)
-                    || findInput(pp) || findInput(ppp);
+                // сначала ищем captcha-специфичный input
+                // в ближайшей форме
+                const form = img.closest('form');
+                let inp = findCaptchaInput(form)
+                    || findCaptchaInput(p)
+                    || findCaptchaInput(pp)
+                    || findCaptchaInput(ppp);
+                // fallback: общий поиск текстового input
+                if (!inp) {
+                    inp = findInput(p)
+                        || findInput(pp)
+                        || findInput(ppp)
+                        || findInput(form);
+                }
                 if (!inp) continue;
                 let imgSel = img.id
                     ? '#' + img.id : null;
@@ -913,7 +946,8 @@ async def _detect_image_captcha(page, rucaptcha_key):
                     if (r.width > 500
                         && r.height > 500)
                         continue;
-                    const inp = findInput(ctx);
+                    const inp = findCaptchaInput(ctx)
+                        || findInput(ctx);
                     if (!inp) continue;
                     let imgSel = img.id
                         ? '#' + img.id : null;
@@ -1162,51 +1196,74 @@ async def _try_click_smartcaptcha(page):
         '.CheckboxCaptcha-Anchor,'
         '[class*="checkbox" i],'
         'button[class*="check" i],'
-        '[role="checkbox"]'
+        '[role="checkbox"],'
+        '[data-testid="checkbox"],'
+        '.CheckboxCaptcha-Button'
     )
 
     # 1. Обход ВСЕХ фреймов (включая вложенные)
     #    через page.frames — решает проблему
-    #    Tilda SmartCaptcha с вложенными iframe
-    for frame in page.frames:
-        if frame == page.main_frame:
-            continue
-        try:
-            f = frame
-            is_sc = False
-            while f and f != page.main_frame:
-                if any(
-                    p in f.url.lower() for p in _SC_PAT
-                ):
-                    is_sc = True
-                    break
-                f = f.parent_frame
-            if not is_sc:
-                try:
-                    is_sc = await frame.evaluate(
-                        r"""() => {
-                        const t = (
-                            document.body.innerText||''
-                        ).toLowerCase();
-                        return /не робот|not a robot|я не робот/
-                            .test(t);
-                    }""")
-                except Exception:
-                    pass
-            if not is_sc:
+    #    Tilda SmartCaptcha с вложенными iframe.
+    #    Retry до 3 раз с паузой, т.к. iframe капчи
+    #    может ещё грузиться после submit.
+    for attempt in range(3):
+        if attempt > 0:
+            await asyncio.sleep(2)
+        sc_frame_found = False
+        for frame in page.frames:
+            if frame == page.main_frame:
                 continue
-            cb = await frame.query_selector(_CB_SEL)
-            if cb:
-                await cb.click()
-                if log:
-                    log.log_captcha(
-                        "smartcaptcha_checkbox_click",
-                        frame_url=frame.url[:60],
-                    )
-                await asyncio.sleep(3)
-                return True
-        except Exception:
-            continue
+            try:
+                f = frame
+                is_sc = False
+                while f and f != page.main_frame:
+                    if any(
+                        p in f.url.lower()
+                        for p in _SC_PAT
+                    ):
+                        is_sc = True
+                        break
+                    f = f.parent_frame
+                if not is_sc:
+                    try:
+                        is_sc = await frame.evaluate(
+                            r"""() => {
+                            const t = (
+                                document.body.innerText
+                                ||''
+                            ).toLowerCase();
+                            return /не робот|not a robot|я не робот/
+                                .test(t);
+                        }""")
+                    except Exception:
+                        pass
+                if not is_sc:
+                    continue
+                sc_frame_found = True
+                cb = await frame.query_selector(
+                    _CB_SEL
+                )
+                if not cb:
+                    try:
+                        cb = await frame.wait_for_selector(
+                            _CB_SEL, timeout=3000,
+                            state="visible",
+                        )
+                    except Exception:
+                        pass
+                if cb:
+                    await cb.click()
+                    if log:
+                        log.log_captcha(
+                            "smartcaptcha_checkbox_click",
+                            frame_url=frame.url[:60],
+                        )
+                    await asyncio.sleep(3)
+                    return True
+            except Exception:
+                continue
+        if not sc_frame_found:
+            break
 
     # 2. Ищем по тексту в DOM
     try:
@@ -1403,6 +1460,85 @@ async def _extract_smartcaptcha_sitekey(page):
                 return m.group(1)
     except Exception:
         pass
+
+    # Fallback 2: Tilda captcha iframe
+    # (forms.tildaapi.com/procces/captcha/) —
+    # sitekey внутри DOM cross-origin iframe,
+    # но Playwright может обращаться к фреймам напрямую
+    try:
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            furl = (frame.url or "").lower()
+            if "tildaapi" not in furl:
+                continue
+            try:
+                sk = await frame.evaluate(r"""() => {
+                    // data-sitekey на контейнере SmartCaptcha
+                    const el = document.querySelector(
+                        '[data-sitekey]');
+                    if (el) return el.getAttribute(
+                        'data-sitekey');
+                    // SmartCaptcha widget container
+                    const sc = document.querySelector(
+                        '#smartcaptcha,'
+                        + '[id*="smartcaptcha" i],'
+                        + '[class*="smart-captcha" i],'
+                        + '[class*="smartcaptcha" i]');
+                    if (sc) {
+                        const k = sc.getAttribute(
+                            'data-sitekey');
+                        if (k) return k;
+                    }
+                    // iframe внутри Tilda captcha iframe
+                    for (const f of document.querySelectorAll(
+                        'iframe')) {
+                        const src = (f.src || '');
+                        if (/smartcaptcha|captcha/i
+                            .test(src)) {
+                            const m = src.match(
+                                /sitekey=([^&]+)/i);
+                            if (m) return m[1];
+                        }
+                    }
+                    // inline scripts внутри iframe
+                    for (const s of document.querySelectorAll(
+                        'script:not([src])')) {
+                        const t = s.textContent || '';
+                        const m = t.match(
+                            /sitekey['":\s]+['"]([^'"]{10,})['"]/i);
+                        if (m) return m[1];
+                    }
+                    return null;
+                }""")
+                if sk:
+                    return sk
+            except Exception:
+                pass
+            # вложенные фреймы внутри tildaapi фрейма
+            for sub in frame.child_frames:
+                sub_url = (sub.url or "").lower()
+                m = _re.search(
+                    r"sitekey=([^&]+)",
+                    sub_url, _re.IGNORECASE,
+                )
+                if m:
+                    return m.group(1)
+                try:
+                    sk2 = await sub.evaluate(r"""() => {
+                        const el = document.querySelector(
+                            '[data-sitekey]');
+                        if (el) return el.getAttribute(
+                            'data-sitekey');
+                        return null;
+                    }""")
+                    if sk2:
+                        return sk2
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     return None
 
 
@@ -2161,7 +2297,10 @@ async def handle_post_submit_captcha(
                             "post_submit_no_sitekey",
                         )
 
-            return None
+            # Не возвращаем None сразу — даём
+            # следующему раунду шанс (iframe может
+            # ещё загружаться)
+            continue
 
         # Не SmartCaptcha: ищем reCAPTCHA/hCaptcha
         if rucaptcha_key:
