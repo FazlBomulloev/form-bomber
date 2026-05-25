@@ -233,7 +233,7 @@ async def check_site_v2(
         if _browser is None:
             pw = await async_playwright().start()
             _browser = await pw.chromium.launch(
-                headless=True,
+                headless=False,
                 args=[
                     "--disable-blink-features="
                     "AutomationControlled",

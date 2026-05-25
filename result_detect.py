@@ -1,4 +1,257 @@
+import re as _re
 from config import SUCCESS_TEXTS, ERROR_PHRASES
+from logger import get_logger as _get_log
+
+_SKIP_URL_RE = _re.compile(
+    r"metric|analytic|yandex\.(ru|net)/watch|google"
+    r"(-analytics|tagmanager)|pixel|beacon|mc\.yandex"
+    r"|doubleclick|facebook\.com/(tr|events)|hotjar"
+    r"|gtag|collect\?|\.gif\?|fonts\.|\.css\?|\.js\?"
+    r"|favicon|\.png|\.jpg|\.svg|\.woff",
+    _re.IGNORECASE,
+)
+
+_OK_RE = _re.compile(
+    r"success|\"ok\"|\"status\"\s*:\s*\"?(?:ok|true)"
+    r"|спасибо|thank|принят|отправлен|записан|получили"
+    r"|\"result\"\s*:\s*\"?(?:ok|success)|mail_sent"
+    r"|sent_ok|\"sent\"\s*:\s*true|\"message_sent\""
+    r"|благодар|заявка\s"
+    r"|\"code\"\s*:\s*1\b"
+    r"|\"response\"\s*:\s*1\b",
+    _re.IGNORECASE,
+)
+
+_ERR_RE = _re.compile(
+    r"error|\"status\"\s*:\s*\"?(?:fail|error)"
+    r"|ошибка|invalid|captcha|validation",
+    _re.IGNORECASE,
+)
+
+_CAPTCHA_RE = _re.compile(
+    r"needcaptcha|captcha.required|captcha_required",
+    _re.IGNORECASE,
+)
+
+_FORM_URL_RE = _re.compile(
+    r"lead|form|contact|submit|send|zapis|callback"
+    r"|order|request|feedback|mail|appointment"
+    r"|procces|ajax|application|bid|zakaz|consult"
+    r"|обратн|заявк",
+    _re.IGNORECASE,
+)
+
+
+class PlaywrightNetworkListener:
+    """Перехватчик POST на уровне Playwright CDP.
+    Проверяет наличие телефона в POST body чтобы
+    отличить отправку формы от прочих запросов."""
+
+    def __init__(self, phone=""):
+        self._raw = []
+        self._handler = None
+        digits = _re.sub(r"\D", "", phone or "")
+        self._phone_short = digits[-10:] if len(
+            digits,
+        ) >= 10 else digits
+
+    def start(self, page):
+        self._raw.clear()
+        log = _get_log()
+
+        def _on_response(response):
+            try:
+                req = response.request
+                if req.method not in (
+                    "POST", "PUT", "PATCH",
+                ):
+                    return
+                url = req.url or ""
+                if _SKIP_URL_RE.search(url):
+                    return
+                post_data = ""
+                try:
+                    post_data = req.post_data or ""
+                except Exception:
+                    pass
+                self._raw.append({
+                    "resp": response,
+                    "url": url[:300],
+                    "status": response.status,
+                    "post_data": post_data[:500],
+                })
+                if log:
+                    has_phone = (
+                        self._phone_short
+                        and self._phone_short
+                        in _re.sub(
+                            r"\D", "", post_data,
+                        )
+                    )
+                    log.step(
+                        "net_capture",
+                        f"{req.method} "
+                        f"{response.status} "
+                        f"{url[:70]}"
+                        + (" [OUR]" if has_phone
+                           else ""),
+                    )
+            except Exception as e:
+                if log:
+                    log.warn(f"net_cap err: {e}")
+
+        self._handler = _on_response
+        page.on("response", self._handler)
+        if log:
+            log.step(
+                "net_listener",
+                f"started  phone={self._phone_short}",
+            )
+
+    def stop(self, page):
+        if self._handler:
+            try:
+                page.remove_listener(
+                    "response", self._handler,
+                )
+            except Exception:
+                pass
+            self._handler = None
+
+    def clear(self):
+        self._raw.clear()
+
+    def _is_our_request(self, post_data):
+        """POST содержит наш телефон?"""
+        if not self._phone_short:
+            return False
+        digits = _re.sub(r"\D", "", post_data)
+        return self._phone_short in digits
+
+    async def check_result(self):
+        """Анализирует перехваченные POST-ответы.
+        Приоритет: запросы с нашим телефоном."""
+        log = _get_log()
+        if not self._raw:
+            if log:
+                log.step("net_check", "0 POST")
+            return None
+
+        if log:
+            log.step(
+                "net_check",
+                f"{len(self._raw)} POST",
+            )
+
+        our_result = None
+        other_result = None
+
+        for entry in reversed(self._raw):
+            resp = entry["resp"]
+            url = entry["url"]
+            status = entry["status"]
+            post_data = entry["post_data"]
+            is_ours = self._is_our_request(
+                post_data,
+            )
+
+            body = ""
+            try:
+                body = (await resp.text())[:800]
+            except Exception:
+                try:
+                    raw = await resp.body()
+                    body = raw[:800].decode(
+                        "utf-8", errors="replace",
+                    )
+                except Exception:
+                    pass
+
+            tag = "OUR" if is_ours else "other"
+            if log:
+                log.step(
+                    "net_resp",
+                    f"[{tag}] {status} {url[:55]}",
+                    body=body[:120].replace(
+                        "\n", " ",
+                    ) if body else "(empty)",
+                )
+
+            if body and _CAPTCHA_RE.search(body):
+                r = {
+                    "state": "captcha_required",
+                    "match": (
+                        "NET: captcha " + url[:50]
+                    ),
+                }
+                if is_ours:
+                    return r
+                continue
+
+            is_form_url = _FORM_URL_RE.search(url)
+
+            r = None
+            body_stripped = body.strip()
+            if 200 <= status < 300:
+                if body and _OK_RE.search(body):
+                    r = {
+                        "state": "success",
+                        "match": "NET: " + body[:60],
+                    }
+                elif body_stripped in (
+                    "true", "1", "ok", "OK",
+                ):
+                    r = {
+                        "state": "success",
+                        "match": (
+                            "NET: " + body_stripped
+                        ),
+                    }
+                elif is_ours or is_form_url:
+                    r = {
+                        "state": "likely_success",
+                        "match": (
+                            "NET POST 2xx: "
+                            + url[:55]
+                        ),
+                    }
+            elif (
+                status >= 400
+                or (body and _ERR_RE.search(body))
+            ):
+                if not (body and _OK_RE.search(body)):
+                    r = {
+                        "state": "error",
+                        "match": (
+                            f"NET {status}: "
+                            + body[:55]
+                        ),
+                    }
+
+            if r is None:
+                continue
+
+            if is_ours:
+                if (
+                    our_result is None
+                    or r["state"] == "success"
+                ):
+                    our_result = r
+            else:
+                if other_result is None:
+                    other_result = r
+
+        result = our_result or other_result
+        if log:
+            if result:
+                log.ok(
+                    f"net_result: "
+                    f"{result['state']} — "
+                    f"{result['match'][:60]}",
+                )
+            else:
+                log.warn("net_result: None")
+        return result
 
 
 async def _fallback_detect(page, pre_text, url_changed):
@@ -202,7 +455,7 @@ async def capture_pre_submit_text(page, form_el=None):
 
 async def detect_submission_result(
     page, form_el=None, pre_text="",
-    url_changed=False,
+    url_changed=False, net_listener=None,
 ):
     safe_form_el = None if url_changed else form_el
     try:
@@ -461,15 +714,55 @@ async def detect_submission_result(
             "errorPhrases": ERROR_PHRASES,
             "urlChanged": url_changed,
         })
-    except Exception:
+    except Exception as _exc:
         dom_result = await _fallback_detect(
             page, pre_text, url_changed,
         )
 
-    if dom_result.get("state") == "unchanged":
-        xhr = await check_xhr_result(page)
-        if xhr:
-            return xhr
+    _log = _get_log()
+
+    # ── 1. NET (Playwright CDP) — самый надёжный ──
+    net = None
+    if net_listener:
+        net = await net_listener.check_result()
+
+    if net and net.get("state") == "success":
+        return net
+
+    # ── 2. JS-level XHR ──
+    xhr = await check_xhr_result(page)
+    if _log:
+        _ds = dom_result.get("state", "?")
+        _dm = dom_result.get("match", "")[:60]
+        _log.step(
+            "detect",
+            f"dom={_ds}"
+            + (f"({_dm})" if _dm else "")
+            + f"  jsxhr={xhr.get('state') if xhr else 'None'}"
+            + f"  net={net.get('state') if net else 'None'}",
+        )
+
+    if xhr and xhr.get("state") == "success":
+        return xhr
+
+    # ── 3. NET likely_success (POST 2xx form-url) ──
+    if net and net.get("state") == "likely_success":
+        ds = dom_result.get("state")
+        if ds in (
+            "unchanged", "likely_failed",
+        ):
+            return net
+
+    # ── 4. DOM ──
+    ds = dom_result.get("state")
+    if ds not in ("unchanged", "likely_failed"):
+        return dom_result
+
+    # ── 5. Fallback: XHR/NET non-success ──
+    if xhr:
+        return xhr
+    if net:
+        return net
 
     return dom_result
 

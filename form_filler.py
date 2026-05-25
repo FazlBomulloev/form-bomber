@@ -1681,10 +1681,13 @@ async def submit_with_retry(
         detect_submission_result,
         get_invalid_field_hint,
         setup_xhr_listener,
+        PlaywrightNetworkListener,
     )
     log = get_logger()
     shot_page = page_for_shot or page
 
+    net_listener = PlaywrightNetworkListener(phone)
+    net_listener.start(page)
     await setup_xhr_listener(page)
 
     pre_text = await capture_pre_submit_text(
@@ -1698,6 +1701,7 @@ async def submit_with_retry(
                 "submit",
                 f"попытка {attempt}/{max_submits}",
             )
+        net_listener.clear()
         await setup_xhr_listener(page)
         submitted = await do_submit(
             page, submit_sel, form_el,
@@ -1720,6 +1724,7 @@ async def submit_with_retry(
         dom = await detect_submission_result(
             page, form_el, pre_text,
             url_changed=url_changed,
+            net_listener=net_listener,
         )
         state = dom.get("state", "unchanged")
 
@@ -1733,6 +1738,7 @@ async def submit_with_retry(
             dom2 = await detect_submission_result(
                 page, form_el, pre_text,
                 url_changed=url_changed2,
+                net_listener=net_listener,
             )
             s2 = dom2.get("state", "unchanged")
             if s2 != "unchanged":
@@ -1813,6 +1819,7 @@ async def submit_with_retry(
             if post_captcha == "ok":
                 if log:
                     log.ok("капча после submit решена")
+                net_listener.clear()
                 await setup_xhr_listener(page)
                 await do_submit(
                     page, submit_sel, form_el,
@@ -1826,6 +1833,7 @@ async def submit_with_retry(
                                 pre_url.rstrip("/")
                                 != page.url.rstrip("/")
                             ),
+                            net_listener=net_listener,
                         )
                     )
                 except Exception:
@@ -1851,6 +1859,9 @@ async def submit_with_retry(
                                     != page.url.rstrip(
                                         "/"
                                     )
+                                ),
+                                net_listener=(
+                                    net_listener
                                 ),
                             )
                         )
