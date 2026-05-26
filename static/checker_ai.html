@@ -522,10 +522,6 @@
       color: #4ade80;
     }
 
-    .s-cached_profile {
-      background: rgba(34, 197, 94, .1);
-      color: #86efac;
-    }
 
     .s-calltouch_api {
       background: rgba(79, 142, 247, .15);
@@ -575,14 +571,6 @@
       border-radius: 4px;
     }
 
-    .profile-tag {
-      font-size: 10px;
-      color: #86efac;
-      background: rgba(34, 197, 94, .1);
-      padding: 1px 5px;
-      border-radius: 4px;
-      margin-left: 3px;
-    }
 
     .vision-tag {
       font-size: 10px;
@@ -716,9 +704,8 @@
       <path d="M18 2v4h4" />
     </svg>
     <h1>AI Form Checker</h1>
-    <span class="ai-badge">DeepSeek</span>
+    <span class="ai-badge">Claude</span>
     <span class="ai-badge" style="background:linear-gradient(90deg,#7c3aed,#a78bfa);margin-left:3px">+ Vision</span>
-    <span class="sub" id="profilesInfo">Загрузка...</span>
   </div>
 
   <div class="layout">
@@ -728,7 +715,6 @@
       <div class="sidebar-tabs">
         <button class="sidebar-tab active" onclick="showTab('tab-new',this)">Новая проверка</button>
         <button class="sidebar-tab" onclick="showTab('tab-history',this)">История</button>
-        <button class="sidebar-tab" onclick="showTab('tab-cache',this);loadProfiles()">Кэш</button>
       </div>
 
       <!-- Tab: New -->
@@ -756,33 +742,33 @@
         <div class="form-row">
           <div>
             <label>Фамилия (тест)</label>
-            <input type="text" id="testLastName" value="Петров">
+            <input type="text" id="testLastName">
           </div>
           <div>
             <label>Имя (тест)</label>
-            <input type="text" id="testFirstName" value="Иван">
+            <input type="text" id="testFirstName">
           </div>
           <div>
             <label>Отчество (тест)</label>
-            <input type="text" id="testPatronymic" value="Алексеевич">
+            <input type="text" id="testPatronymic">
           </div>
         </div>
 
         <div class="form-row">
           <div>
             <label>Телефон (тест)</label>
-            <input type="tel" id="testPhone" value="+79332181324">
+            <input type="tel" id="testPhone">
           </div>
           <div>
             <label>Email (тест)</label>
-            <input type="email" id="testEmail" value="analginawb@inbox.ru">
+            <input type="email" id="testEmail">
           </div>
         </div>
 
         <div class="form-row">
           <div>
             <label>Комментарий</label>
-            <input type="text" id="testComment" value="нужны виниры, жду звонка, спасибо!">
+            <input type="text" id="testComment">
           </div>
         </div>
 
@@ -790,21 +776,18 @@
 
         <div>
           <label>Claude API ключ <span style="color:var(--muted);font-size:10px">(необязательно — AI fallback если эвристика не справилась)</span></label>
-          <input type="password" id="claudeKey" placeholder="sk-... (optional)" value="sk-aafa6bc8d83bafadc787a7af79ba1608159a4fd53e1b8c2fc23f16cbe10def49">
+          <input type="password" id="claudeKey" placeholder="sk-ant-... (optional)">
         </div>
 
         <div>
           <label>RuCaptcha API ключ <span style="color:var(--muted);font-size:10px">(необязательно — для автоматического
               решения капчи)</span></label>
-          <input type="password" id="rucaptchaKey" placeholder="5309e80a..." value="5309e80aa7e2b3a2aed4b18f9ace53d6">
+          <input type="password" id="rucaptchaKey" placeholder="5309e80a...">
         </div>
 
         <div class="info-block">
-          <b>Как работает:</b> если задан DeepSeek ключ, используется AI-анализ HTML формы; если ключ пустой —
+          <b>Как работает:</b> если задан Claude ключ, используется AI-анализ HTML формы; если ключ пустой —
           включается локальная эвристика селекторов.
-          Если задан OpenAI ключ — дополнительно делается скриншот формы и gpt-4o визуально проверяет/уточняет поля.
-          После первого успеха профиль сохраняется, повторные запуски идут быстрее. Капча решается через RuCaptcha (если
-          ключ указан).
         </div>
 
         <div>
@@ -828,12 +811,6 @@
               <span>Автодожим ошибок в процессе</span>
             </label>
           </div>
-          <div style="display:flex;align-items:flex-end">
-            <label style="display:flex;gap:6px;align-items:center;cursor:pointer;margin:0">
-              <input type="checkbox" id="forceAiFirst" checked>
-              <span>Всегда сначала AI (не кеш)</span>
-            </label>
-          </div>
         </div>
 
         <button class="btn btn-primary btn-full" id="startBtn" onclick="startCheck()">
@@ -854,19 +831,6 @@
         </div>
       </div>
 
-      <!-- Tab: Cache -->
-      <div id="tab-cache" class="tab-pane">
-        <div style="display:flex;gap:6px;margin-bottom:4px">
-          <button class="btn btn-danger" style="flex:1;font-size:12px" onclick="clearAllProfiles()">
-            Очистить весь кэш
-          </button>
-          <button class="btn" style="background:var(--card);border:1px solid var(--border);flex:0 0 auto;font-size:12px"
-            onclick="loadProfiles()">
-            ↻
-          </button>
-        </div>
-        <div id="profilesList" style="display:flex;flex-direction:column;gap:6px;margin-top:4px"></div>
-      </div>
 
     </div>
 
@@ -891,10 +855,6 @@
             <div class="stat green">
               <div class="num" id="statSuccess">0</div>
               <div class="lbl">успех</div>
-            </div>
-            <div class="stat purple">
-              <div class="num" id="statCached">0</div>
-              <div class="lbl">из кеша</div>
             </div>
             <div class="stat orange">
               <div class="num" id="statCaptcha">0</div>
@@ -924,7 +884,6 @@
         <span style="font-size:11px;color:var(--muted)">Фильтр:</span>
         <button class="filter-btn active" onclick="setFilter('all',this)">Все</button>
         <button class="filter-btn" onclick="setFilter('success',this)">Успех</button>
-        <button class="filter-btn" onclick="setFilter('cached_profile',this)">Из кеша</button>
         <button class="filter-btn" onclick="setFilter('captcha',this)">Капча</button>
         <button class="filter-btn" onclick="setFilter('no_form',this)">Нет формы</button>
         <button class="filter-btn" onclick="setFilter('failed',this)">Ошибка</button>
@@ -967,7 +926,7 @@
     let allRows = [];
     let domainAttemptState = {};
     let rowIndex = 0;
-    let stats = { total: 0, success: 0, cached: 0, captcha: 0, failed: 0, done: 0, tokens: 0 };
+    let stats = { total: 0, success: 0, captcha: 0, failed: 0, done: 0, tokens: 0 };
 
     // ── Tabs ──────────────────────────────────────────────────────────────────────
     function showTab(id, btn) {
@@ -1066,7 +1025,7 @@
     function resetResults(total) {
       allRows = []; rowIndex = 0;
       domainAttemptState = {};
-      stats = { total, success: 0, cached: 0, captcha: 0, failed: 0, uncertain: 0, done: 0, tokens: 0 };
+      stats = { total, success: 0, captcha: 0, failed: 0, uncertain: 0, done: 0, tokens: 0 };
       document.getElementById('resultsBody').innerHTML = '';
       document.getElementById('resultsTable').style.display = '';
       document.getElementById('emptyState').style.display = 'none';
@@ -1080,7 +1039,6 @@
       stats.done++;
       stats.tokens += r.tokens_used || 0;
       if (r.status === 'success' || r.status === 'calltouch_api') stats.success++;
-      else if (r.status === 'cached_profile') { stats.success++; stats.cached++; }
       else if (r.status === 'captcha') stats.captcha++;
       else if (r.status === 'uncertain') stats.uncertain = (stats.uncertain || 0) + 1;
       else stats.failed++;
@@ -1091,14 +1049,13 @@
 
     function matchFilter(r) {
       if (activeFilter === 'all') return true;
-      if (activeFilter === 'success') return ['success', 'calltouch_api', 'cached_profile'].includes(r.status);
+      if (activeFilter === 'success') return ['success', 'calltouch_api'].includes(r.status);
       if (activeFilter === 'failed') return ['failed', 'site_error', 'ai_error', 'no_ai_key'].includes(r.status);
       return r.status === activeFilter;
     }
 
     const STATUS_LABELS = {
       success: 'Успех',
-      cached_profile: 'Кеш',
       calltouch_api: 'Calltouch API',
       captcha: 'Капча',
       uncertain: 'Неизвестно',
@@ -1112,7 +1069,6 @@
       calltouch_api: 'Calltouch API',
       ai_playwright: 'AI + Playwright',
       heuristic_playwright: 'Локальная эвристика',
-      cached_profile: 'Кеш профиля',
       none: '—',
     };
 
@@ -1126,7 +1082,6 @@
 
       const label = STATUS_LABELS[r.status] || r.status;
       const method = METHOD_LABELS[r.method] || r.method;
-      const profileTag = r.profile_saved ? '<span class="profile-tag">💾 профиль</span>' : '';
       const tokTag = r.tokens_used > 0 ? `<span class="tokens-tag">${r.tokens_used}t</span>` : '';
       const visionTag = r.vision_used ? '<span class="vision-tag">👁 vision</span>' : '';
       const attemptTag = r.attempt_no ? `<span class="tokens-tag">try:${r.attempt_no}${r.max_attempts ? '/' + r.max_attempts : ''}</span>` : '';
@@ -1140,7 +1095,7 @@
     <td><span class="status-badge s-${r.status}">${label}</span></td>
     <td>
       <span class="method-tag">${esc(method)}</span>
-      ${profileTag}${visionTag}${tokTag}${attemptTag}${reasonTag}
+      ${visionTag}${tokTag}${attemptTag}${reasonTag}
     </td>
     <td class="td-msg">${esc(r.message || '')}</td>
     <td style="width:36px">${hasDetail
@@ -1155,7 +1110,7 @@
         dr.className = 'detail-row';
         dr.style.display = 'none';
         let detHtml = '';
-        if (notes) detHtml += `<div><b>AI (DeepSeek):</b> ${esc(notes)}</div>`;
+        if (notes) detHtml += `<div><b>AI (Claude):</b> ${esc(notes)}</div>`;
         if (r.vision_notes) detHtml += `<div><b>👁 Vision (gpt-4o):</b> ${esc(r.vision_notes)}</div>`;
         dr.innerHTML = `<td colspan="6"><div class="detail-inner">${detHtml}</div></td>`;
         tbody.insertBefore(dr, tr.nextSibling);
@@ -1187,13 +1142,12 @@
     function updateStats() {
       document.getElementById('statTotal').textContent = stats.total;
       document.getElementById('statSuccess').textContent = stats.success;
-      document.getElementById('statCached').textContent = stats.cached;
       document.getElementById('statCaptcha').textContent = stats.captcha;
       document.getElementById('statUncertain').textContent = stats.uncertain || 0;
       document.getElementById('statFailed').textContent = stats.failed;
       document.getElementById('statDone').textContent = stats.done;
       document.getElementById('totalTokens').textContent = stats.tokens.toLocaleString();
-      const cost = (stats.tokens * 0.00000035).toFixed(4);
+      const cost = (stats.tokens * 0.000003).toFixed(4);
       document.getElementById('totalCost').textContent = cost;
       const pct = stats.total > 0 ? (stats.done / stats.total * 100) : 0;
       document.getElementById('progressBar').style.width = pct + '%';
@@ -1209,7 +1163,6 @@
       setTitle(`Готово: ${stats.success}/${stats.total} успешно | ${stats.tokens.toLocaleString()} токенов`);
       toast(`Проверка завершена: ${stats.success} из ${stats.total}`);
       if (ws) { ws.close(); ws = null; }
-      refreshProfilesInfo();
     }
 
     function stopCheck() {
@@ -1275,7 +1228,7 @@
         _idx: i + 1,
         url: r.url, status: r.status, method: r.method,
         message: r.message, tokens_used: r.tokens_used || 0,
-        profile_saved: !!r.profile_saved, ai_notes: r.ai_notes || '',
+        ai_notes: r.ai_notes || '',
         reason_code: r.reason_code || '',
         attempt_no: r.attempt_no || 1,
         vision_used: !!r.vision_used, vision_notes: r.vision_notes || '',
@@ -1288,65 +1241,7 @@
       showTab('tab-new', document.querySelectorAll('.sidebar-tab')[0]);
     }
 
-    // ── Profiles info ─────────────────────────────────────────────────────────────
-    async function refreshProfilesInfo() {
-      try {
-        const d = await fetch('/api/profiles/count').then(r => r.json());
-        // Считаем consent-файлы через profiles list
-        const profiles = await fetch('/api/profiles').then(r => r.json()).catch(() => []);
-        const consentCount = profiles.filter(p => p.has_consent).length;
-        let txt = `Профилей: ${d.count}`;
-        if (consentCount) txt += ` · Consent: ${consentCount}`;
-        document.getElementById('profilesInfo').textContent = txt;
-      } catch (e) { }
-    }
 
-    async function loadProfiles() {
-      const list = document.getElementById('profilesList');
-      list.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px 0">Загрузка...</div>';
-      try {
-        const profiles = await fetch('/api/profiles').then(r => r.json());
-        if (!profiles.length) {
-          list.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px 0">Кэш пуст</div>';
-          return;
-        }
-        list.innerHTML = profiles.map(p => `
-      <div style="background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:8px 10px;font-size:12px">
-        <div style="display:flex;align-items:center;gap:6px">
-          <span style="font-weight:600;color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.domain)}">${esc(p.domain)}</span>
-          <button onclick="deleteProfile('${esc(p.domain)}')" title="Удалить профиль"
-            style="background:none;border:none;color:var(--red);cursor:pointer;font-size:14px;padding:0 2px;flex-shrink:0">✕</button>
-        </div>
-        <div style="color:var(--muted);margin-top:3px;display:flex;gap:8px;flex-wrap:wrap">
-          ${p.has_captcha ? '<span style="color:var(--yellow)">⚠ капча</span>' : ''}
-          ${p.dropdowns > 0 ? `<span>📋 ${p.dropdowns} дропд.</span>` : ''}
-          ${p.cookie_selector ? '<span style="color:var(--accent)">🍪 AI-куки</span>' : ''}
-          ${p.has_consent ? '<span style="color:var(--green)" title="Согласие с куки сохранено — баннер не появится">🔒 consent</span>' : ''}
-          <span>✓ ${p.success_count} успехов</span>
-          <span>${p.tokens_used} токенов</span>
-        </div>
-      </div>
-    `).join('');
-      } catch (e) {
-        list.innerHTML = '<div style="color:var(--red);font-size:12px">Ошибка загрузки</div>';
-      }
-    }
-
-    async function deleteProfile(domain) {
-      if (!confirm(`Удалить профиль для ${domain}?`)) return;
-      await fetch(`/api/profiles/${encodeURIComponent(domain)}`, { method: 'DELETE' });
-      toast(`Профиль ${domain} удалён`);
-      loadProfiles();
-      refreshProfilesInfo();
-    }
-
-    async function clearAllProfiles() {
-      if (!confirm('Удалить ВСЕ закешированные профили?\nСледующий запуск заново запросит AI для каждого сайта.')) return;
-      await fetch('/api/profiles', { method: 'DELETE' });
-      toast('Весь кэш профилей очищен');
-      loadProfiles();
-      refreshProfilesInfo();
-    }
 
     // ── Helpers ───────────────────────────────────────────────────────────────────
     function esc(s) {
@@ -1367,7 +1262,6 @@
     // ── Init ──────────────────────────────────────────────────────────────────────
     (async function () {
       countUrls();
-      await refreshProfilesInfo();
       try {
         const sessions = await fetch('/api/sessions').then(r => r.json());
         if (sessions.length) {
