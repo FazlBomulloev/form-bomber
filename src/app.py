@@ -1,11 +1,14 @@
 import csv
 import io
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+_SRC = Path(__file__).resolve().parent
 
 from config import PORT
 from db import (
@@ -26,7 +29,7 @@ async def lifespan(app):
 app = FastAPI(lifespan=lifespan)
 app.mount(
     "/static",
-    StaticFiles(directory="static"),
+    StaticFiles(directory=str(_SRC / "static")),
     name="static",
 )
 
@@ -47,7 +50,7 @@ class StartRequest(BaseModel):
 
 @app.get("/")
 async def index():
-    return FileResponse("static/checker_ai.html")
+    return FileResponse(str(_SRC / "static/checker_ai.html"))
 
 
 @app.post("/api/start")
