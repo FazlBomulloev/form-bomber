@@ -3,13 +3,14 @@ import io
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 _SRC = Path(__file__).resolve().parent
 
+from auth import check_credentials, create_token, verify_token
 from config import PORT
 from db import (
     db_init, db_recover_stale,
@@ -33,6 +34,35 @@ app.mount(
     name="static",
 )
 
+_PUBLIC_PATHS = {"/login", "/api/login", "/static"}
+
+
+def _get_token(request: Request) -> str | None:
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:]
+    return request.cookies.get("token")
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if any(path == p or path.startswith(p + "/") for p in _PUBLIC_PATHS):
+        return await call_next(request)
+
+    token = _get_token(request)
+    if not token or not verify_token(token):
+        if path.startswith("/api/"):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return RedirectResponse("/login", status_code=302)
+
+    return await call_next(request)
+
+
+class LoginRequest(BaseModel):
+    login: str
+    password: str
+
 
 class StartRequest(BaseModel):
     urls: list[str]
@@ -46,6 +76,21 @@ class StartRequest(BaseModel):
     rucaptcha_key: str = ""
     session_name: str = "Проверка"
     max_attempts: int = 3
+
+
+@app.get("/login")
+async def login_page():
+    return FileResponse(str(_SRC / "static/login.html"))
+
+
+@app.post("/api/login")
+async def api_login(req: LoginRequest):
+    if not check_credentials(req.login, req.password):
+        return JSONResponse({"error": "Неверный логин или пароль"}, status_code=401)
+    token = create_token(req.login)
+    resp = JSONResponse({"ok": True, "token": token})
+    resp.set_cookie("token", token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 7)
+    return resp
 
 
 @app.get("/")
@@ -143,6 +188,10 @@ async def api_profiles_clear():
 
 @app.websocket("/ws/{sid}")
 async def ws_endpoint(ws: WebSocket, sid: str):
+    token = ws.query_params.get("token") or ws.cookies.get("token")
+    if not token or not verify_token(token):
+        await ws.close(code=4001, reason="unauthorized")
+        return
     await ws.accept()
     _ws_clients.add(ws)
     try:

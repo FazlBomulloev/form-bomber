@@ -706,6 +706,7 @@
     <h1>AI Form Checker</h1>
     <span class="ai-badge">Claude</span>
     <span class="ai-badge" style="background:linear-gradient(90deg,#7c3aed,#a78bfa);margin-left:3px">+ Vision</span>
+    <button onclick="logout()" class="btn btn-ghost btn-sm" style="margin-left:8px;font-size:11px">Выйти</button>
   </div>
 
   <div class="layout">
@@ -919,6 +920,27 @@
   </div>
 
   <script>
+    // ── Auth ─────────────────────────────────────────────────────────────────────
+    function getToken() {
+      return localStorage.getItem('token') || '';
+    }
+    function authHeaders() {
+      const t = getToken();
+      return t ? { 'Authorization': 'Bearer ' + t } : {};
+    }
+    function authFetch(url, opts = {}) {
+      opts.headers = Object.assign({}, opts.headers || {}, authHeaders());
+      return fetch(url, opts).then(r => {
+        if (r.status === 401) { logout(); throw new Error('unauthorized'); }
+        return r;
+      });
+    }
+    function logout() {
+      localStorage.removeItem('token');
+      document.cookie = 'token=; path=/; max-age=0';
+      window.location.href = '/login';
+    }
+
     // ── State ─────────────────────────────────────────────────────────────────────
     let currentSid = null;
     let ws = null;
@@ -973,7 +995,7 @@
 
       let data;
       try {
-        const r = await fetch('/api/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const r = await authFetch('/api/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         data = await r.json();
       } catch (e) { toast('Ошибка подключения'); return; }
 
@@ -991,7 +1013,8 @@
     // ── WebSocket ─────────────────────────────────────────────────────────────────
     function connectWs(sid) {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      ws = new WebSocket(`${proto}://${location.host}/ws/${sid}`);
+      const wsToken = getToken();
+      ws = new WebSocket(`${proto}://${location.host}/ws/${sid}?token=${encodeURIComponent(wsToken)}`);
       ws.onmessage = e => {
         const msg = JSON.parse(e.data);
         if (msg.type === 'start') {
@@ -1180,7 +1203,7 @@
     async function loadHistory() {
       const c = document.getElementById('sessionsList');
       let sessions;
-      try { sessions = await fetch('/api/sessions').then(r => r.json()); }
+      try { sessions = await authFetch('/api/sessions').then(r => r.json()); }
       catch (e) { c.innerHTML = '<p style="color:var(--muted);padding:12px;font-size:13px">Ошибка</p>'; return; }
 
       if (!sessions.length) {
@@ -1212,8 +1235,8 @@
       let results, sessions;
       try {
         [results, sessions] = await Promise.all([
-          fetch(`/api/sessions/${sid}/results`).then(r => r.json()),
-          fetch('/api/sessions').then(r => r.json()),
+          authFetch(`/api/sessions/${sid}/results`).then(r => r.json()),
+          authFetch('/api/sessions').then(r => r.json()),
         ]);
       } catch (e) { toast('Ошибка загрузки'); return; }
 
@@ -1263,7 +1286,7 @@
     (async function () {
       countUrls();
       try {
-        const sessions = await fetch('/api/sessions').then(r => r.json());
+        const sessions = await authFetch('/api/sessions').then(r => r.json());
         if (sessions.length) {
           document.querySelectorAll('.sidebar-tab')[1].textContent = `История (${sessions.length})`;
         }
