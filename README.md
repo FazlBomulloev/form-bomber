@@ -6,8 +6,8 @@
 Интерфейс и API закрыты JWT-авторизацией, данные сессий и профили форм
 хранятся в локальной SQLite-базе.
 
-Ниже — полный путь от пустой машины до работающего контейнера. Читается
-сверху вниз, ничего пропускать не нужно.
+Ниже — полный путь от голого сервера Ubuntu до работающего контейнера.
+Читается сверху вниз, ничего пропускать не нужно.
 
 ---
 
@@ -39,51 +39,82 @@ form-bomber/
 
 ---
 
-## 1. Клонирование проекта
+## 1. Установка Docker на Ubuntu
 
-Понадобится установленный **git**. Репозиторий подключается по SSH, поэтому
-у вас должен быть SSH-ключ, привязанный к аккаунту GitHub
-(см. [инструкцию GitHub по SSH-ключам](https://docs.github.com/ru/authentication/connecting-to-github-with-ssh)).
+На чистом сервере Ubuntu Docker по умолчанию **не установлен**. Проверить:
 
 ```bash
-git clone git@github.com:FazlBomulloev/form-bomber.git
-cd form-bomber
+docker --version
+docker compose version
 ```
 
-Если SSH не настроен, можно склонировать по HTTPS:
+Если команды не найдены — ставим Docker по официальной инструкции:
+
+```bash
+# 1. зависимости
+sudo apt update
+sudo apt install -y ca-certificates curl gnupg
+
+# 2. GPG-ключ репозитория Docker
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | \
+  sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+# 3. подключение репозитория Docker
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# 4. установка движка и плагина compose
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io \
+  docker-buildx-plugin docker-compose-plugin
+
+# 5. запускать docker без sudo
+sudo usermod -aG docker $USER
+newgrp docker   # либо перелогиньтесь в сессию
+```
+
+Проверяем, что всё работает:
+
+```bash
+docker run hello-world
+```
+
+> Альтернатива одной командой (официальный скрипт, удобно для одноразовой
+> настройки сервера): `curl -fsSL https://get.docker.com | sudo sh`
+
+---
+
+## 2. Клонирование проекта
+
+Понадобится **git**:
+
+```bash
+sudo apt update
+sudo apt install -y git
+```
+
+Клонируем репозиторий по HTTPS и заходим в каталог проекта:
 
 ```bash
 git clone https://github.com/FazlBomulloev/form-bomber.git
 cd form-bomber
 ```
 
-Быстрая проверка, что SSH-доступ к GitHub работает:
-
-```bash
-ssh -T git@github.com
-# Ожидаемый ответ: "Hi FazlBomulloev! You've successfully authenticated..."
-```
-
 ---
 
-## 2. Настройка переменных окружения (`.env`)
+## 3. Настройка переменных окружения (`.env`)
 
 Секреты в репозиторий не попадают (`.env` в `.gitignore`). В проекте лежит
 шаблон `.env.example` — скопируйте его и отредактируйте.
-
-**Linux / macOS:**
 
 ```bash
 cp .env.example .env
 ```
 
-**Windows (PowerShell):**
-
-```powershell
-Copy-Item .env.example .env
-```
-
-Откройте `.env` в любом редакторе и заполните три переменные:
+Откройте `.env` в редакторе (`nano .env`) и заполните три переменные:
 
 | Переменная      | Назначение                                        | Что поставить                                  |
 |-----------------|---------------------------------------------------|------------------------------------------------|
@@ -94,7 +125,7 @@ Copy-Item .env.example .env
 Сгенерировать надёжный `JWT_SECRET` можно так:
 
 ```bash
-python -c "import secrets; print(secrets.token_hex(32))"
+python3 -c "import secrets; print(secrets.token_hex(32))"
 ```
 
 Скопируйте полученную строку в `JWT_SECRET`. Пример заполненного `.env`:
@@ -110,12 +141,9 @@ JWT_SECRET=8f3c2a9b7d1e4f6a0c5b8e2d7a1f9c3b6e4d8a2f0c7b5e9d1a3f6c8b2e4d7a09
 
 ---
 
-## 3. Запуск через Docker (рекомендуется)
+## 4. Запуск через Docker
 
-Понадобятся **Docker** и **Docker Compose** (в свежем Docker Desktop /
-Docker Engine compose уже встроен).
-
-### Вариант А — Docker Compose (одна команда)
+### Вариант А — Docker Compose (рекомендуется)
 
 Из корня проекта:
 
@@ -132,8 +160,9 @@ docker compose up -d --build
 - каталог `./data` монтируется в контейнер, поэтому база и профили
   **сохраняются** между перезапусками.
 
-Откройте в браузере: **http://localhost:8002** — появится страница входа.
-Логиньтесь логином и паролем из `.env`.
+Открываем в браузере: **http://СЕРВЕР:8002** (или `http://localhost:8002`,
+если запускаете локально) — появится страница входа. Логиньтесь логином и
+паролем из `.env`.
 
 Полезные команды:
 
@@ -160,18 +189,6 @@ docker run -d \
   form-bomber:latest
 ```
 
-На Windows в PowerShell путь к тому указывается так:
-
-```powershell
-docker run -d `
-  --name form-bomber `
-  --restart unless-stopped `
-  -p 8002:8002 `
-  --env-file .env `
-  -v "${PWD}\data:/app/data" `
-  form-bomber:latest
-```
-
 Управление:
 
 ```bash
@@ -183,37 +200,21 @@ docker rm -f form-bomber      # удалить контейнер
 
 ---
 
-## 4. Запуск без Docker (локально)
+## 5. Доступ снаружи (firewall)
 
-Если Docker не нужен — есть нативный путь.
-
-### Windows (готовые .bat-скрипты)
-
-```bat
-install.bat            :: создаёт .venv, ставит зависимости и Chromium
-start_checker_ai.bat   :: запускает сервер
-```
-
-### Linux / macOS (вручную)
+Если сервер за фаерволом (ufw), откройте порт `8002`:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-
-pip install --upgrade pip
-pip install -r requirements.txt
-playwright install --with-deps chromium
-
-python src/app.py
+sudo ufw allow 8002/tcp
 ```
 
-Сервер поднимется на `http://localhost:8002`.
+После этого панель будет доступна по адресу `http://IP-СЕРВЕРА:8002`.
 
 ---
 
-## 5. Проверка, что всё работает
+## 6. Проверка, что всё работает
 
-1. Откройте `http://localhost:8002` — должна открыться страница входа.
+1. Откройте `http://IP-СЕРВЕРА:8002` — должна открыться страница входа.
 2. Войдите логином/паролем из `.env`.
 3. После входа откроется основная панель — можно добавлять URL и запускать
    проверку форм.
@@ -222,7 +223,7 @@ python src/app.py
 
 - убедитесь, что контейнер запущен: `docker compose ps`;
 - посмотрите логи: `docker compose logs -f`;
-- проверьте, что порт `8002` не занят другим процессом.
+- проверьте, что порт `8002` открыт в фаерволе и не занят другим процессом.
 
 ---
 
@@ -237,7 +238,18 @@ python src/app.py
 
 Чтобы сменить внешний порт, не трогая код, поправьте маппинг в
 `docker-compose.yml`, например `"9000:8002"` — тогда панель будет на
-`http://localhost:9000`.
+`http://IP-СЕРВЕРА:9000`.
+
+---
+
+## Обновление проекта
+
+После изменений в репозитории:
+
+```bash
+git pull
+docker compose up -d --build
+```
 
 ---
 
