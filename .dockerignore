@@ -1,0 +1,25 @@
+# Окружение и кеши
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Локальные данные (база, профили) — не тащим в образ
+data/
+
+# Секреты
+.env
+
+# Git и инструментальные каталоги
+.git/
+.gitignore
+.claude/
+.playwright-mcp/
+
+# Windows-скрипты (в контейнере не нужны)
+install.bat
+start_checker_ai.bat
+
+# Документация и прочее
+*.md
+сайты_очищенные.txt

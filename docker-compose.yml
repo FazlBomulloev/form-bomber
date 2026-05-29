@@ -1,0 +1,14 @@
+services:
+  form-bomber:
+    build: .
+    image: form-bomber:latest
+    container_name: form-bomber
+    restart: unless-stopped
+    ports:
+      # хост:контейнер — наружу отдаём тот же 8002
+      - "8002:8002"
+    env_file:
+      - .env
+    volumes:
+      # база и профили форм переживают пересоздание контейнера
+      - ./data:/app/data
