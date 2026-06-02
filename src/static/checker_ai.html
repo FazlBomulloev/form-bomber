@@ -656,6 +656,44 @@
       color: var(--text);
     }
 
+    /* ── Client cards ── */
+    .client-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 8px 10px;
+      margin-bottom: 6px;
+    }
+
+    .client-card .form-row { margin-top: 5px; }
+
+    .client-card input {
+      padding: 5px 7px;
+      font-size: 12px;
+    }
+
+    .client-card label {
+      font-size: 10px;
+      margin-bottom: 1px;
+    }
+
+    .cp-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      margin: 2px;
+    }
+
+    .cp-pending { background: var(--card); color: var(--muted); }
+    .cp-running { background: rgba(234,179,8,.15); color: var(--yellow); }
+    .cp-done { background: rgba(34,197,94,.12); color: var(--green); }
+    .cp-paused_hours { background: rgba(249,115,22,.15); color: var(--orange); }
+
+    input[type="number"] { width: 100%; }
+
     /* ── Scrollbar ── */
     ::-webkit-scrollbar {
       width: 5px;
@@ -740,61 +778,27 @@
 
         <div class="divider"></div>
 
-        <div class="form-row">
-          <div>
-            <label>Фамилия (тест)</label>
-            <input type="text" id="testLastName">
-          </div>
-          <div>
-            <label>Имя (тест)</label>
-            <input type="text" id="testFirstName">
-          </div>
-          <div>
-            <label>Отчество (тест)</label>
-            <input type="text" id="testPatronymic">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <label style="margin:0;font-size:12px;font-weight:600;color:var(--accent)">Клиенты <span id="clientCount" style="color:var(--muted);font-weight:400"></span></label>
+          <div style="display:flex;gap:5px">
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('csvInput').click()">CSV</button>
+            <input type="file" id="csvInput" accept=".csv" onchange="loadClientsCsv(this)" style="display:none">
+            <button class="btn btn-ghost btn-sm" onclick="addClient()">+ Клиент</button>
           </div>
         </div>
 
-        <div class="form-row">
-          <div>
-            <label>Телефон (тест)</label>
-            <input type="tel" id="testPhone">
-          </div>
-          <div>
-            <label>Email (тест)</label>
-            <input type="email" id="testEmail">
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div>
-            <label>Комментарий</label>
-            <input type="text" id="testComment">
-          </div>
-        </div>
+        <div id="clientsList"></div>
 
         <div class="divider"></div>
 
         <div>
-          <label>Claude API ключ <span style="color:var(--muted);font-size:10px">(необязательно — AI fallback если эвристика не справилась)</span></label>
+          <label>Claude API ключ <span style="color:var(--muted);font-size:10px">(необязательно)</span></label>
           <input type="password" id="claudeKey" placeholder="sk-ant-... (optional)">
         </div>
 
         <div>
-          <label>RuCaptcha API ключ <span style="color:var(--muted);font-size:10px">(необязательно — для автоматического
-              решения капчи)</span></label>
+          <label>RuCaptcha API ключ <span style="color:var(--muted);font-size:10px">(необязательно)</span></label>
           <input type="password" id="rucaptchaKey" placeholder="5309e80a...">
-        </div>
-
-        <div class="info-block">
-          <b>Как работает:</b> если задан Claude ключ, используется AI-анализ HTML формы; если ключ пустой —
-          включается локальная эвристика селекторов.
-        </div>
-
-        <div>
-          <label>Прокси <span style="color:var(--muted);font-size:10px">(необязательно, по одному на строку: host:port
-              или host:port:user:pass)</span></label>
-          <textarea id="proxiesInput" rows="2" placeholder=""></textarea>
         </div>
 
         <div class="form-row">
@@ -802,16 +806,10 @@
             <label>Макс. попыток на домен</label>
             <input type="number" id="maxAttempts" min="1" max="6" value="3">
           </div>
-          <div>
-            <label>Таймаут домена (сек)</label>
-            <input type="number" id="domainTimeoutSec" min="30" max="1200" value="240">
-          </div>
-          <div style="display:flex;align-items:flex-end">
-            <label style="display:flex;gap:6px;align-items:center;cursor:pointer;margin:0">
-              <input type="checkbox" id="autoAdapt" checked>
-              <span>Автодожим ошибок в процессе</span>
-            </label>
-          </div>
+        </div>
+
+        <div class="info-block">
+          <b>Порядок:</b> каждый клиент прогоняется по всем сайтам последовательно. Новый клиент — новый прокси. Работа с 6:30 до 22:00 МСК.
         </div>
 
         <button class="btn btn-primary btn-full" id="startBtn" onclick="startCheck()">
@@ -875,6 +873,10 @@
             </div>
           </div>
         </div>
+        <div id="queueProgress" style="display:none;margin-bottom:8px">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Очередь клиентов:</div>
+          <div id="clientProgressList" style="display:flex;flex-wrap:wrap;gap:2px"></div>
+        </div>
         <div class="progress-bar-wrap">
           <div class="progress-bar" id="progressBar"></div>
         </div>
@@ -920,37 +922,28 @@
   </div>
 
   <script>
-    // ── Auth ─────────────────────────────────────────────────────────────────────
-    function getToken() {
-      return localStorage.getItem('token') || '';
-    }
-    function authHeaders() {
-      const t = getToken();
-      return t ? { 'Authorization': 'Bearer ' + t } : {};
-    }
+    // ── Auth ──
+    function getToken() { return localStorage.getItem('token') || ''; }
+    function authHeaders() { const t = getToken(); return t ? { 'Authorization': 'Bearer ' + t } : {}; }
     function authFetch(url, opts = {}) {
       opts.headers = Object.assign({}, opts.headers || {}, authHeaders());
-      return fetch(url, opts).then(r => {
-        if (r.status === 401) { logout(); throw new Error('unauthorized'); }
-        return r;
-      });
+      return fetch(url, opts).then(r => { if (r.status === 401) { logout(); throw new Error('unauthorized'); } return r; });
     }
-    function logout() {
-      localStorage.removeItem('token');
-      document.cookie = 'token=; path=/; max-age=0';
-      window.location.href = '/login';
-    }
+    function logout() { localStorage.removeItem('token'); document.cookie = 'token=; path=/; max-age=0'; window.location.href = '/login'; }
 
-    // ── State ─────────────────────────────────────────────────────────────────────
+    // ── State ──
     let currentSid = null;
+    let currentQueueId = null;
     let ws = null;
     let activeFilter = 'all';
     let allRows = [];
     let domainAttemptState = {};
     let rowIndex = 0;
-    let stats = { total: 0, success: 0, captcha: 0, failed: 0, done: 0, tokens: 0 };
+    let stats = { total: 0, success: 0, captcha: 0, failed: 0, uncertain: 0, done: 0, tokens: 0 };
+    let clientsList = [];
+    let queueTotalClients = 0;
 
-    // ── Tabs ──────────────────────────────────────────────────────────────────────
+    // ── Tabs ──
     function showTab(id, btn) {
       document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
       document.querySelectorAll('.sidebar-tab').forEach(b => b.classList.remove('active'));
@@ -959,12 +952,11 @@
       if (id === 'tab-history') loadHistory();
     }
 
-    // ── URL counter ───────────────────────────────────────────────────────────────
+    // ── URL counter ──
     function countUrls() {
       const n = document.getElementById('urlsInput').value.split('\n').filter(l => l.trim()).length;
       document.getElementById('urlCount').textContent = n ? `(${n})` : '';
     }
-
     function loadFile(input) {
       const file = input.files[0]; if (!file) return;
       const r = new FileReader();
@@ -972,22 +964,74 @@
       r.readAsText(file, 'UTF-8');
     }
 
-    // ── Start ─────────────────────────────────────────────────────────────────────
+    // ── Clients ──
+    function addClient() {
+      clientsList.push({ phone: '', firstname: '', lastname: '', patronymic: '', email: '', comment: '', proxy: '' });
+      renderClientsList();
+    }
+    function removeClient(idx) {
+      clientsList.splice(idx, 1);
+      renderClientsList();
+    }
+    function updateClient(idx, field, val) { clientsList[idx][field] = val; }
+
+    function renderClientsList() {
+      const c = document.getElementById('clientsList');
+      document.getElementById('clientCount').textContent = clientsList.length ? `(${clientsList.length})` : '';
+      if (!clientsList.length) { c.innerHTML = '<div style="color:var(--muted);font-size:12px;text-align:center;padding:8px">Нажмите «+ Клиент» или загрузите CSV</div>'; return; }
+      c.innerHTML = clientsList.map((cl, i) => `
+        <div class="client-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+            <span style="font-size:11px;font-weight:600;color:var(--accent)">Клиент #${i + 1}</span>
+            <button class="btn btn-ghost btn-sm" style="padding:2px 6px;font-size:13px;line-height:1" onclick="removeClient(${i})">&times;</button>
+          </div>
+          <div class="form-row">
+            <div><label>Телефон *</label><input type="tel" value="${esc(cl.phone)}" onchange="updateClient(${i},'phone',this.value)" placeholder="+79..."></div>
+            <div><label>Прокси</label><input type="text" value="${esc(cl.proxy)}" onchange="updateClient(${i},'proxy',this.value)" placeholder="http://host:port"></div>
+          </div>
+          <div class="form-row">
+            <div><label>Фамилия</label><input type="text" value="${esc(cl.lastname)}" onchange="updateClient(${i},'lastname',this.value)"></div>
+            <div><label>Имя</label><input type="text" value="${esc(cl.firstname)}" onchange="updateClient(${i},'firstname',this.value)"></div>
+            <div><label>Отчество</label><input type="text" value="${esc(cl.patronymic)}" onchange="updateClient(${i},'patronymic',this.value)"></div>
+          </div>
+          <div class="form-row">
+            <div><label>Email</label><input type="email" value="${esc(cl.email)}" onchange="updateClient(${i},'email',this.value)"></div>
+            <div><label>Комментарий</label><input type="text" value="${esc(cl.comment)}" onchange="updateClient(${i},'comment',this.value)"></div>
+          </div>
+        </div>`).join('');
+    }
+
+    async function loadClientsCsv(input) {
+      const file = input.files[0]; if (!file) return;
+      const formData = new FormData();
+      formData.append('file', file);
+      try {
+        const r = await authFetch('/api/clients/parse-csv', { method: 'POST', body: formData });
+        const data = await r.json();
+        if (data.clients && data.clients.length) {
+          clientsList.push(...data.clients);
+          renderClientsList();
+          toast(`Загружено ${data.clients.length} клиентов из CSV`);
+        } else { toast('CSV пустой или ошибка формата'); }
+      } catch (e) { toast('Ошибка загрузки CSV'); }
+      input.value = '';
+    }
+
+    // ── Start ──
     async function startCheck() {
       const urlsRaw = document.getElementById('urlsInput').value.trim();
       if (!urlsRaw) { toast('Введите список сайтов'); return; }
       const urls = urlsRaw.split('\n').map(u => u.trim()).filter(Boolean);
       if (!urls.length) { toast('Нет URL'); return; }
+      if (!clientsList.length) { toast('Добавьте хотя бы одного клиента'); return; }
+      for (let i = 0; i < clientsList.length; i++) {
+        if (!clientsList[i].phone) { toast(`Клиент #${i + 1}: укажите телефон`); return; }
+      }
 
       const body = {
-        session_name: document.getElementById('sessionName').value.trim() || 'Проверка',
+        queue_name: document.getElementById('sessionName').value.trim() || 'Проверка',
         urls,
-        firstname: document.getElementById('testFirstName').value.trim(),
-        lastname: document.getElementById('testLastName').value.trim(),
-        patronymic: document.getElementById('testPatronymic').value.trim(),
-        phone: document.getElementById('testPhone').value.trim(),
-        email: document.getElementById('testEmail').value.trim(),
-        comment: document.getElementById('testComment').value.trim(),
+        clients: clientsList,
         claude_key: document.getElementById('claudeKey').value.trim(),
         rucaptcha_key: document.getElementById('rucaptchaKey').value.trim(),
         max_attempts: parseInt(document.getElementById('maxAttempts').value || '3', 10),
@@ -995,59 +1039,95 @@
 
       let data;
       try {
-        const r = await authFetch('/api/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const r = await authFetch('/api/queue/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         data = await r.json();
       } catch (e) { toast('Ошибка подключения'); return; }
-
       if (data.error) { toast(data.error); return; }
 
-      currentSid = data.session_id;
-      resetResults(data.total);
-      setTitle(`Запуск: ${data.total} сайтов...`);
+      currentQueueId = data.queue_id;
+      queueTotalClients = data.total_clients;
+      resetResults(data.total_urls * data.total_clients);
+      setTitle(`Запуск: ${data.total_clients} клиентов, ${data.total_urls} сайтов...`);
       document.getElementById('startBtn').style.display = 'none';
       document.getElementById('stopBtn').style.display = '';
       document.getElementById('exportBtn').disabled = true;
-      connectWs(currentSid);
+      showQueueProgress(data.total_clients);
+      connectWs(currentQueueId, true);
     }
 
-    // ── WebSocket ─────────────────────────────────────────────────────────────────
-    function connectWs(sid) {
+    // ── Queue progress ──
+    function showQueueProgress(totalClients) {
+      queueTotalClients = totalClients;
+      const el = document.getElementById('queueProgress');
+      el.style.display = '';
+      const list = document.getElementById('clientProgressList');
+      let html = '';
+      for (let i = 0; i < totalClients; i++) {
+        const cl = clientsList[i];
+        const label = cl ? (cl.firstname || cl.phone || `#${i + 1}`) : `#${i + 1}`;
+        html += `<span class="cp-item cp-pending" id="cp-${i}">${esc(label)}</span>`;
+      }
+      list.innerHTML = html;
+    }
+
+    function updateClientProgress(position, status) {
+      const el = document.getElementById(`cp-${position}`);
+      if (el) { el.className = `cp-item cp-${status}`; }
+    }
+
+    // ── WebSocket ──
+    function connectWs(id, isQueue) {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const wsToken = getToken();
-      ws = new WebSocket(`${proto}://${location.host}/ws/${sid}?token=${encodeURIComponent(wsToken)}`);
+      const path = isQueue ? `/ws/queue/${id}` : `/ws/${id}`;
+      ws = new WebSocket(`${proto}://${location.host}${path}?token=${encodeURIComponent(wsToken)}`);
       ws.onmessage = e => {
         const msg = JSON.parse(e.data);
-        if (msg.type === 'start') {
-          stats.total = msg.total;
-          setTitle(`Проверка: ${document.getElementById('sessionName').value}`);
-        } else if (msg.type === 'attempt') {
-          domainAttemptState[msg.url] = {
-            attempt_no: msg.attempt_no || 1,
-            max_attempts: msg.max_attempts || 1,
-            retrying: !!msg.retrying,
-          };
-          const host = (msg.url || '').replace(/^https?:\/\//, '').split('/')[0];
-          setTitle(`Проверка: ${host} (${msg.attempt_no}/${msg.max_attempts})`);
-        } else if (msg.type === 'attempt_result') {
-          domainAttemptState[msg.url] = {
-            attempt_no: msg.attempt_no || 1,
-            max_attempts: msg.max_attempts || 1,
-            reason_code: msg.reason_code || '',
-            status: msg.status || '',
-          };
-        } else if (msg.type === 'result') {
-          addResult(msg);
-        } else if (msg.type === 'done') {
-          onDone();
+        switch (msg.type) {
+          case 'queue_start':
+            stats.total = msg.total_urls * msg.total_clients;
+            setTitle(`Очередь: ${msg.total_clients} клиентов, ${msg.total_urls} сайтов`);
+            break;
+          case 'client_start':
+            updateClientProgress(msg.client_position, 'running');
+            setTitle(`Клиент ${msg.client_position + 1}/${queueTotalClients}: ${msg.client_name}`);
+            currentSid = msg.session_id;
+            break;
+          case 'client_done':
+            updateClientProgress(msg.client_position, 'done');
+            break;
+          case 'start':
+            stats.total = msg.total;
+            setTitle(`Проверка: ${document.getElementById('sessionName').value}`);
+            break;
+          case 'attempt': {
+            const host = (msg.url || '').replace(/^https?:\/\//, '').split('/')[0];
+            setTitle(`Проверка: ${host} (${msg.attempt_no}/${msg.max_attempts})`);
+            break;
+          }
+          case 'result':
+            addResult(msg);
+            break;
+          case 'paused':
+            setTitle(`Пауза: рабочие часы МСК 6:30–22:00. Возобновление в ${msg.resume_at_msk}`);
+            break;
+          case 'resumed':
+            setTitle('Возобновлено');
+            break;
+          case 'queue_done':
+            onDone();
+            break;
+          case 'done':
+            if (!currentQueueId) onDone();
+            break;
         }
       };
-      ws.onclose = () => { if (document.getElementById('stopBtn').style.display !== 'none') onDone(); };
+      ws.onclose = () => { if (document.getElementById('stopBtn').style.display !== 'none' && !currentQueueId) onDone(); };
     }
 
-    // ── Results ───────────────────────────────────────────────────────────────────
+    // ── Results ──
     function resetResults(total) {
-      allRows = []; rowIndex = 0;
-      domainAttemptState = {};
+      allRows = []; rowIndex = 0; domainAttemptState = {};
       stats = { total, success: 0, captcha: 0, failed: 0, uncertain: 0, done: 0, tokens: 0 };
       document.getElementById('resultsBody').innerHTML = '';
       document.getElementById('resultsTable').style.display = '';
@@ -1056,17 +1136,14 @@
     }
 
     function addResult(r) {
-      rowIndex++;
-      r._idx = rowIndex;
-      allRows.push(r);
-      stats.done++;
-      stats.tokens += r.tokens_used || 0;
+      rowIndex++; r._idx = rowIndex; allRows.push(r);
+      stats.done++; stats.tokens += r.tokens_used || 0;
       if (r.status === 'success' || r.status === 'calltouch_api') stats.success++;
       else if (r.status === 'captcha') stats.captcha++;
-      else if (r.status === 'uncertain') stats.uncertain = (stats.uncertain || 0) + 1;
+      else if (r.status === 'uncertain') stats.uncertain++;
       else stats.failed++;
       updateStats();
-      setTitle(`Проверка: обработано ${stats.done}/${stats.total}`);
+      setTitle(`Обработано ${stats.done}/${stats.total}`);
       if (matchFilter(r)) renderRow(r, true);
     }
 
@@ -1077,65 +1154,34 @@
       return r.status === activeFilter;
     }
 
-    const STATUS_LABELS = {
-      success: 'Успех',
-      calltouch_api: 'Calltouch API',
-      captcha: 'Капча',
-      uncertain: 'Неизвестно',
-      no_form: 'Нет формы',
-      no_ai_key: 'Нет ключа AI',
-      ai_error: 'Ошибка AI',
-      site_error: 'Сайт недоступен',
-      failed: 'Ошибка',
-    };
-    const METHOD_LABELS = {
-      calltouch_api: 'Calltouch API',
-      ai_playwright: 'AI + Playwright',
-      heuristic_playwright: 'Локальная эвристика',
-      none: '—',
-    };
+    const STATUS_LABELS = { success: 'Успех', calltouch_api: 'Calltouch', captcha: 'Капча', uncertain: 'Неизвестно', no_form: 'Нет формы', no_ai_key: 'Нет ключа AI', ai_error: 'Ошибка AI', site_error: 'Сайт недоступен', failed: 'Ошибка' };
+    const METHOD_LABELS = { calltouch_api: 'Calltouch API', ai_playwright: 'AI + PW', heuristic_playwright: 'Эвристика', none: '—' };
 
     function renderRow(r, animate) {
       const tbody = document.getElementById('resultsBody');
       if (document.getElementById(`row-${r._idx}`)) return;
-
       const tr = document.createElement('tr');
       tr.id = `row-${r._idx}`;
       if (animate) tr.classList.add('row-new');
-
       const label = STATUS_LABELS[r.status] || r.status;
       const method = METHOD_LABELS[r.method] || r.method;
       const tokTag = r.tokens_used > 0 ? `<span class="tokens-tag">${r.tokens_used}t</span>` : '';
-      const visionTag = r.vision_used ? '<span class="vision-tag">👁 vision</span>' : '';
       const attemptTag = r.attempt_no ? `<span class="tokens-tag">try:${r.attempt_no}${r.max_attempts ? '/' + r.max_attempts : ''}</span>` : '';
       const reasonTag = r.reason_code ? `<span class="tokens-tag">${esc(r.reason_code)}</span>` : '';
       const notes = r.ai_notes || '';
-      const hasDetail = !!(notes || r.vision_notes);
-
+      const hasDetail = !!notes;
       tr.innerHTML = `
-    <td style="color:var(--muted);font-size:11px;width:34px">${r._idx}</td>
-    <td class="td-url"><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a></td>
-    <td><span class="status-badge s-${r.status}">${label}</span></td>
-    <td>
-      <span class="method-tag">${esc(method)}</span>
-      ${visionTag}${tokTag}${attemptTag}${reasonTag}
-    </td>
-    <td class="td-msg">${esc(r.message || '')}</td>
-    <td style="width:36px">${hasDetail
-          ? `<button class="expand-btn" onclick="toggleDetail(${r._idx},this)">▶</button>`
-          : ''}</td>
-  `;
+        <td style="color:var(--muted);font-size:11px;width:34px">${r._idx}</td>
+        <td class="td-url"><a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.url)}</a></td>
+        <td><span class="status-badge s-${r.status}">${label}</span></td>
+        <td><span class="method-tag">${esc(method)}</span>${tokTag}${attemptTag}${reasonTag}</td>
+        <td class="td-msg">${esc(r.message || '')}</td>
+        <td style="width:36px">${hasDetail ? `<button class="expand-btn" onclick="toggleDetail(${r._idx},this)">▶</button>` : ''}</td>`;
       tbody.insertBefore(tr, tbody.firstChild);
-
       if (hasDetail) {
         const dr = document.createElement('tr');
-        dr.id = `det-${r._idx}`;
-        dr.className = 'detail-row';
-        dr.style.display = 'none';
-        let detHtml = '';
-        if (notes) detHtml += `<div><b>AI (Claude):</b> ${esc(notes)}</div>`;
-        if (r.vision_notes) detHtml += `<div><b>👁 Vision (gpt-4o):</b> ${esc(r.vision_notes)}</div>`;
-        dr.innerHTML = `<td colspan="6"><div class="detail-inner">${detHtml}</div></td>`;
+        dr.id = `det-${r._idx}`; dr.className = 'detail-row'; dr.style.display = 'none';
+        dr.innerHTML = `<td colspan="6"><div class="detail-inner"><b>AI:</b> ${esc(notes)}</div></td>`;
         tbody.insertBefore(dr, tr.nextSibling);
       }
     }
@@ -1148,20 +1194,19 @@
       btn.textContent = open ? '▶' : '▼';
     }
 
-    // ── Filter ────────────────────────────────────────────────────────────────────
+    // ── Filter ──
     function setFilter(f, btn) {
       activeFilter = f;
       document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       rebuildTable();
     }
-
     function rebuildTable() {
       document.getElementById('resultsBody').innerHTML = '';
       [...allRows].reverse().forEach(r => { if (matchFilter(r)) renderRow(r, false); });
     }
 
-    // ── Stats ─────────────────────────────────────────────────────────────────────
+    // ── Stats ──
     function updateStats() {
       document.getElementById('statTotal').textContent = stats.total;
       document.getElementById('statSuccess').textContent = stats.success;
@@ -1170,60 +1215,57 @@
       document.getElementById('statFailed').textContent = stats.failed;
       document.getElementById('statDone').textContent = stats.done;
       document.getElementById('totalTokens').textContent = stats.tokens.toLocaleString();
-      const cost = (stats.tokens * 0.000003).toFixed(4);
-      document.getElementById('totalCost').textContent = cost;
+      document.getElementById('totalCost').textContent = (stats.tokens * 0.000003).toFixed(4);
       const pct = stats.total > 0 ? (stats.done / stats.total * 100) : 0;
       document.getElementById('progressBar').style.width = pct + '%';
     }
-
     function setTitle(t) { document.getElementById('progressTitle').textContent = t; }
 
-    // ── Done ──────────────────────────────────────────────────────────────────────
+    // ── Done ──
     function onDone() {
       document.getElementById('startBtn').style.display = '';
       document.getElementById('stopBtn').style.display = 'none';
       document.getElementById('exportBtn').disabled = false;
       setTitle(`Готово: ${stats.success}/${stats.total} успешно | ${stats.tokens.toLocaleString()} токенов`);
       toast(`Проверка завершена: ${stats.success} из ${stats.total}`);
+      currentQueueId = null;
       if (ws) { ws.close(); ws = null; }
     }
 
-    function stopCheck() {
-      if (ws) { ws.close(); ws = null; }
-      onDone();
-      toast('Остановлено');
+    async function stopCheck() {
+      if (currentQueueId) {
+        try { await authFetch('/api/queue/stop', { method: 'POST' }); } catch (e) { }
+        toast('Остановка очереди...');
+      } else {
+        if (ws) { ws.close(); ws = null; }
+        onDone();
+        toast('Остановлено');
+      }
     }
 
-    // ── Export ────────────────────────────────────────────────────────────────────
-    function exportCsv() {
-      if (currentSid) window.location.href = `/api/sessions/${currentSid}/export`;
-    }
+    // ── Export ──
+    function exportCsv() { if (currentSid) window.location.href = `/api/sessions/${currentSid}/export`; }
 
-    // ── History ───────────────────────────────────────────────────────────────────
+    // ── History ──
     async function loadHistory() {
       const c = document.getElementById('sessionsList');
       let sessions;
       try { sessions = await authFetch('/api/sessions').then(r => r.json()); }
       catch (e) { c.innerHTML = '<p style="color:var(--muted);padding:12px;font-size:13px">Ошибка</p>'; return; }
-
-      if (!sessions.length) {
-        c.innerHTML = '<div class="empty" style="height:160px"><p>Нет сессий</p></div>'; return;
-      }
+      if (!sessions.length) { c.innerHTML = '<div class="empty" style="height:160px"><p>Нет сессий</p></div>'; return; }
       c.innerHTML = sessions.map(s => `
-    <div class="session-item ${s.id === currentSid ? 'active' : ''}" onclick="loadSession('${s.id}',this)">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start">
-        <div class="s-name">${esc(s.name)}</div>
-        <span class="session-badge badge-${s.status}">${s.status}</span>
-      </div>
-      <div class="s-meta">
-        ${s.total} сайтов &bull;
-        <span style="color:var(--green)">${s.success} ок</span> /
-        <span style="color:var(--red)">${s.failed} ошибок</span>
-        &bull; ${s.tokens || 0} токенов
-        &bull; ${fmtDate(s.created_at)}
-      </div>
-    </div>
-  `).join('');
+        <div class="session-item ${s.id === currentSid ? 'active' : ''}" onclick="loadSession('${s.id}',this)">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start">
+            <div class="s-name">${esc(s.name)}</div>
+            <span class="session-badge badge-${s.status}">${s.status}</span>
+          </div>
+          <div class="s-meta">
+            ${s.total} сайтов &bull;
+            <span style="color:var(--green)">${s.success} ок</span> /
+            <span style="color:var(--red)">${s.failed} ошибок</span>
+            &bull; ${fmtDate(s.created_at)}
+          </div>
+        </div>`).join('');
     }
 
     async function loadSession(sid, el) {
@@ -1231,7 +1273,6 @@
       el.classList.add('active');
       currentSid = sid;
       document.getElementById('exportBtn').disabled = false;
-
       let results, sessions;
       try {
         [results, sessions] = await Promise.all([
@@ -1239,58 +1280,129 @@
           authFetch('/api/sessions').then(r => r.json()),
         ]);
       } catch (e) { toast('Ошибка загрузки'); return; }
-
       const sess = sessions.find(s => s.id === sid);
       resetResults(sess ? sess.total : results.length);
       stats.success = sess ? sess.success : 0;
       stats.failed = sess ? sess.failed : 0;
       stats.tokens = sess ? (sess.tokens || 0) : 0;
       stats.done = results.length;
-
       allRows = results.map((r, i) => ({
-        _idx: i + 1,
-        url: r.url, status: r.status, method: r.method,
+        _idx: i + 1, url: r.url, status: r.status, method: r.method,
         message: r.message, tokens_used: r.tokens_used || 0,
-        ai_notes: r.ai_notes || '',
-        reason_code: r.reason_code || '',
+        ai_notes: r.ai_notes || '', reason_code: r.reason_code || '',
         attempt_no: r.attempt_no || 1,
-        vision_used: !!r.vision_used, vision_notes: r.vision_notes || '',
       }));
       rowIndex = allRows.length;
-
-      rebuildTable();
-      updateStats();
+      rebuildTable(); updateStats();
       setTitle(`${sess ? sess.name : sid} — история`);
       showTab('tab-new', document.querySelectorAll('.sidebar-tab')[0]);
     }
 
+    // ── Session persistence ──
+    async function checkActiveQueue() {
+      try {
+        const r = await authFetch('/api/queue/active');
+        const data = await r.json();
+        if (!data.active) return false;
+        currentQueueId = data.queue.id;
+        const clients = data.clients || [];
+        const urls = JSON.parse(data.queue.urls || '[]');
+        queueTotalClients = clients.length;
 
+        clientsList = clients.map(c => ({
+          phone: c.phone, firstname: c.firstname, lastname: c.lastname,
+          patronymic: c.patronymic, email: c.email, comment: c.comment, proxy: c.proxy,
+        }));
+        renderClientsList();
 
-    // ── Helpers ───────────────────────────────────────────────────────────────────
-    function esc(s) {
-      return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    }
-    function fmtDate(s) {
-      if (!s) return '';
-      const d = new Date(s.replace(' ', 'T'));
-      return isNaN(d) ? s : d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
-    }
-    function toast(msg, ms = 3000) {
-      const el = document.createElement('div');
-      el.className = 'toast'; el.textContent = msg;
-      document.body.appendChild(el);
-      setTimeout(() => el.remove(), ms);
+        resetResults(urls.length * clients.length);
+        showQueueProgress(clients.length);
+
+        for (const c of clients) {
+          const pos = c.position;
+          if (c.status === 'done') updateClientProgress(pos, 'done');
+          else if (c.status === 'running') updateClientProgress(pos, 'running');
+          const results = data.results[c.id] || [];
+          for (const r of results) {
+            addResult({
+              url: r.url, status: r.status, method: r.method,
+              message: r.message, tokens_used: r.tokens_used || 0,
+              ai_notes: r.ai_notes || '', reason_code: r.reason_code || '',
+              attempt_no: r.attempt_no || 1,
+            });
+          }
+          if (c.session_id) currentSid = c.session_id;
+        }
+
+        document.getElementById('startBtn').style.display = 'none';
+        document.getElementById('stopBtn').style.display = '';
+        const status = data.queue.status;
+        if (status === 'paused_hours') setTitle('Пауза: рабочие часы МСК 6:30–22:00');
+        else setTitle(`Очередь: ${data.queue.done_clients}/${clients.length} клиентов обработано`);
+        connectWs(currentQueueId, true);
+        return true;
+      } catch (e) { return false; }
     }
 
-    // ── Init ──────────────────────────────────────────────────────────────────────
+    // ── Restore last completed queue ──
+    async function checkLastQueue() {
+      try {
+        const r = await authFetch('/api/queue/last');
+        const data = await r.json();
+        if (!data.found) return false;
+        const queue = data.queue;
+        if (queue.status === 'running' || queue.status === 'paused_hours') return false;
+
+        const clients = data.clients || [];
+        const urls = JSON.parse(queue.urls || '[]');
+
+        clientsList = clients.map(c => ({
+          phone: c.phone, firstname: c.firstname, lastname: c.lastname,
+          patronymic: c.patronymic, email: c.email, comment: c.comment, proxy: c.proxy,
+        }));
+        renderClientsList();
+
+        resetResults(urls.length * clients.length);
+        showQueueProgress(clients.length);
+
+        for (const c of clients) {
+          const pos = c.position;
+          if (c.status === 'done') updateClientProgress(pos, 'done');
+          const results = data.results[c.id] || [];
+          for (const r of results) {
+            addResult({
+              url: r.url, status: r.status, method: r.method,
+              message: r.message, tokens_used: r.tokens_used || 0,
+              ai_notes: r.ai_notes || '', reason_code: r.reason_code || '',
+              attempt_no: r.attempt_no || 1,
+            });
+          }
+          if (c.session_id) currentSid = c.session_id;
+        }
+
+        document.getElementById('exportBtn').disabled = false;
+        setTitle(`Готово: ${stats.success}/${stats.total} успешно | ${stats.tokens.toLocaleString()} токенов`);
+        return true;
+      } catch (e) { return false; }
+    }
+
+    // ── Helpers ──
+    function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+    function fmtDate(s) { if (!s) return ''; const d = new Date(s.replace(' ', 'T')); return isNaN(d) ? s : d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+    function toast(msg, ms = 3000) { const el = document.createElement('div'); el.className = 'toast'; el.textContent = msg; document.body.appendChild(el); setTimeout(() => el.remove(), ms); }
+
+    // ── Init ──
     (async function () {
       countUrls();
-      try {
-        const sessions = await authFetch('/api/sessions').then(r => r.json());
-        if (sessions.length) {
-          document.querySelectorAll('.sidebar-tab')[1].textContent = `История (${sessions.length})`;
-        }
-      } catch (_) { }
+      renderClientsList();
+      const restored = await checkActiveQueue();
+      if (!restored) {
+        const restoredLast = await checkLastQueue();
+        try {
+          const sessions = await authFetch('/api/sessions').then(r => r.json());
+          if (sessions.length) document.querySelectorAll('.sidebar-tab')[1].textContent = `История (${sessions.length})`;
+        } catch (_) { }
+      }
     })();
   </script>
 </body>

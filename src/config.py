@@ -1,8 +1,12 @@
 PORT           = 8002
 DB_PATH        = "data/checker_ai.db"
 PROFILES_PATH  = "data/ai_profiles.json"
-CONCURRENCY    = 5
+CONCURRENCY    = 2
 AI_CONCURRENCY = 3
+
+WORK_HOUR_START = (6, 30)
+WORK_HOUR_END   = (22, 0)
+MSK_UTC_OFFSET  = 3
 
 RUCAPTCHA_IN  = "https://rucaptcha.com/in.php"
 RUCAPTCHA_RES = "https://rucaptcha.com/res.php"

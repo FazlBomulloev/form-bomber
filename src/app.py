@@ -3,7 +3,7 @@ import io
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -13,17 +13,22 @@ _SRC = Path(__file__).resolve().parent
 from auth import check_credentials, create_token, verify_token
 from config import PORT
 from db import (
-    db_init, db_recover_stale,
+    db_init, db_recover_stale, db_recover_stale_queues,
     db_get_sessions, db_get_results,
+    db_get_active_queue, db_get_last_queue, db_get_queue_clients,
 )
 from models import profiles_load, profiles_save
-from runner import run_session, _ws_clients
+from runner import (
+    run_session, run_queue,
+    _ws_clients, _queue_cancel, _active_queue_id,
+)
 
 
 @asynccontextmanager
 async def lifespan(app):
     await db_init()
     await db_recover_stale()
+    await db_recover_stale_queues()
     yield
 
 
@@ -75,6 +80,25 @@ class StartRequest(BaseModel):
     claude_key: str = ""
     rucaptcha_key: str = ""
     session_name: str = "Проверка"
+    max_attempts: int = 3
+
+
+class ClientData(BaseModel):
+    phone: str
+    firstname: str = ""
+    lastname: str = ""
+    patronymic: str = ""
+    email: str = ""
+    comment: str = ""
+    proxy: str = ""
+
+
+class StartQueueRequest(BaseModel):
+    urls: list[str]
+    clients: list[ClientData]
+    claude_key: str = ""
+    rucaptcha_key: str = ""
+    queue_name: str = "Проверка"
     max_attempts: int = 3
 
 
@@ -184,6 +208,122 @@ async def api_profile_delete(domain: str):
 async def api_profiles_clear():
     profiles_save({})
     return {"cleared": True}
+
+
+@app.post("/api/queue/start")
+async def api_queue_start(req: StartQueueRequest):
+    if not req.urls:
+        return {"error": "urls пустой"}
+    if not req.clients:
+        return {"error": "clients пустой"}
+    for i, c in enumerate(req.clients):
+        if not c.phone:
+            return {
+                "error": f"Клиент #{i+1}: "
+                "phone не указан"
+            }
+    try:
+        qid = await run_queue(
+            req.urls,
+            [c.model_dump() for c in req.clients],
+            req.claude_key, req.rucaptcha_key,
+            req.queue_name, req.max_attempts,
+        )
+    except ValueError as e:
+        return {"error": str(e)}
+    return {
+        "queue_id": qid,
+        "total_clients": len(req.clients),
+        "total_urls": len(req.urls),
+    }
+
+
+@app.get("/api/queue/active")
+async def api_active_queue():
+    queue = await db_get_active_queue()
+    if not queue:
+        return {"active": False}
+    clients = await db_get_queue_clients(queue["id"])
+    client_results = {}
+    for c in clients:
+        if c.get("session_id"):
+            results = await db_get_results(
+                c["session_id"],
+            )
+            client_results[c["id"]] = results
+    return {
+        "active": True,
+        "queue": queue,
+        "clients": clients,
+        "results": client_results,
+    }
+
+
+@app.get("/api/queue/last")
+async def api_last_queue():
+    queue = await db_get_last_queue()
+    if not queue:
+        return {"found": False}
+    clients = await db_get_queue_clients(queue["id"])
+    client_results = {}
+    for c in clients:
+        if c.get("session_id"):
+            results = await db_get_results(c["session_id"])
+            client_results[c["id"]] = results
+    return {
+        "found": True,
+        "queue": queue,
+        "clients": clients,
+        "results": client_results,
+    }
+
+
+@app.post("/api/queue/stop")
+async def api_queue_stop():
+    from runner import _queue_cancel, _active_queue_id
+    if _active_queue_id:
+        _queue_cancel.set()
+        return {"ok": True, "queue_id": _active_queue_id}
+    return {"error": "Нет активной очереди"}
+
+
+@app.post("/api/clients/parse-csv")
+async def api_parse_csv(file: UploadFile):
+    content = await file.read()
+    text = content.decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(text))
+    clients = []
+    for row in reader:
+        clients.append({
+            "phone": row.get("phone", ""),
+            "firstname": row.get("firstname", ""),
+            "lastname": row.get("lastname", ""),
+            "patronymic": row.get("patronymic", ""),
+            "email": row.get("email", ""),
+            "comment": row.get("comment", ""),
+            "proxy": row.get("proxy", ""),
+        })
+    return {"clients": clients}
+
+
+@app.websocket("/ws/queue/{qid}")
+async def ws_queue_endpoint(ws: WebSocket, qid: str):
+    token = (
+        ws.query_params.get("token")
+        or ws.cookies.get("token")
+    )
+    if not token or not verify_token(token):
+        await ws.close(code=4001, reason="unauthorized")
+        return
+    await ws.accept()
+    _ws_clients.add(ws)
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _ws_clients.discard(ws)
 
 
 @app.websocket("/ws/{sid}")

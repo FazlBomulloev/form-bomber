@@ -1,3 +1,5 @@
+import json
+
 import aiosqlite
 from pathlib import Path
 from config import DB_PATH
@@ -37,34 +39,67 @@ async def db_init():
                     (datetime('now','localtime'))
             )
         """)
-        try:
-            await db.execute(
-                "ALTER TABLE results "
-                "ADD COLUMN reason_code "
-                "TEXT DEFAULT ''"
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS queue (
+                id                TEXT PRIMARY KEY,
+                name              TEXT,
+                status            TEXT DEFAULT 'pending',
+                urls              TEXT DEFAULT '[]',
+                claude_key        TEXT DEFAULT '',
+                rucaptcha_key     TEXT DEFAULT '',
+                max_attempts      INTEGER DEFAULT 3,
+                total_clients     INTEGER DEFAULT 0,
+                done_clients      INTEGER DEFAULT 0,
+                current_client_idx INTEGER DEFAULT 0,
+                created_at        TEXT DEFAULT
+                    (datetime('now','localtime'))
             )
-        except Exception:
-            pass
-        try:
-            await db.execute(
-                "ALTER TABLE results "
-                "ADD COLUMN attempt_no "
-                "INTEGER DEFAULT 1"
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS queue_clients (
+                id         INTEGER PRIMARY KEY
+                           AUTOINCREMENT,
+                queue_id   TEXT NOT NULL,
+                position   INTEGER NOT NULL,
+                phone      TEXT NOT NULL,
+                firstname  TEXT DEFAULT '',
+                lastname   TEXT DEFAULT '',
+                patronymic TEXT DEFAULT '',
+                email      TEXT DEFAULT '',
+                comment    TEXT DEFAULT '',
+                proxy      TEXT DEFAULT '',
+                status     TEXT DEFAULT 'pending',
+                session_id TEXT DEFAULT NULL,
+                created_at TEXT DEFAULT
+                    (datetime('now','localtime'))
             )
-        except Exception:
-            pass
+        """)
+        for col, default in [
+            ("reason_code", "TEXT DEFAULT ''"),
+            ("attempt_no", "INTEGER DEFAULT 1"),
+            ("queue_id", "TEXT DEFAULT ''"),
+            ("client_id", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                await db.execute(
+                    f"ALTER TABLE {'results' if col in ('reason_code', 'attempt_no') else 'sessions'} "
+                    f"ADD COLUMN {col} {default}"
+                )
+            except Exception:
+                pass
         await db.commit()
 
 
 async def db_create_session(
-    sid: str, name: str, total: int
+    sid: str, name: str, total: int,
+    queue_id: str = "", client_id: int = 0,
 ):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO sessions"
-            "(id,name,total,status) "
-            "VALUES(?,?,?,'running')",
-            (sid, name, total),
+            "(id,name,total,status,queue_id,client_id) "
+            "VALUES(?,?,?,'running',?,?)",
+            (sid, name, total, queue_id, client_id),
         )
         await db.commit()
 
@@ -145,3 +180,147 @@ async def db_get_results(sid: str):
             (sid,),
         ) as c:
             return [dict(r) for r in await c.fetchall()]
+
+
+# ── Queue ──────────────────────────────────────
+
+
+async def db_create_queue(
+    qid: str, name: str, urls: list,
+    claude_key: str, rucaptcha_key: str,
+    max_attempts: int, total_clients: int,
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO queue"
+            "(id,name,urls,claude_key,rucaptcha_key,"
+            "max_attempts,total_clients) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (
+                qid, name,
+                json.dumps(urls, ensure_ascii=False),
+                claude_key, rucaptcha_key,
+                max_attempts, total_clients,
+            ),
+        )
+        await db.commit()
+
+
+async def db_add_queue_client(
+    queue_id: str, position: int,
+    phone: str, firstname: str, lastname: str,
+    patronymic: str, email: str, comment: str,
+    proxy: str,
+) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO queue_clients"
+            "(queue_id,position,phone,firstname,"
+            "lastname,patronymic,email,comment,proxy) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                queue_id, position, phone,
+                firstname, lastname, patronymic,
+                email, comment, proxy,
+            ),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def db_get_queue(qid: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM queue WHERE id=?", (qid,),
+        ) as c:
+            row = await c.fetchone()
+            return dict(row) if row else None
+
+
+async def db_get_queue_clients(qid: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM queue_clients "
+            "WHERE queue_id=? ORDER BY position",
+            (qid,),
+        ) as c:
+            return [dict(r) for r in await c.fetchall()]
+
+
+async def db_update_queue_status(qid: str, status: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE queue SET status=? WHERE id=?",
+            (status, qid),
+        )
+        await db.commit()
+
+
+async def db_update_queue_progress(
+    qid: str, current_idx: int, done: int,
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE queue SET current_client_idx=?,"
+            "done_clients=? WHERE id=?",
+            (current_idx, done, qid),
+        )
+        await db.commit()
+
+
+async def db_update_client_status(
+    client_id: int, status: str,
+    session_id: str = None,
+):
+    async with aiosqlite.connect(DB_PATH) as db:
+        if session_id is not None:
+            await db.execute(
+                "UPDATE queue_clients "
+                "SET status=?,session_id=? WHERE id=?",
+                (status, session_id, client_id),
+            )
+        else:
+            await db.execute(
+                "UPDATE queue_clients "
+                "SET status=? WHERE id=?",
+                (status, client_id),
+            )
+        await db.commit()
+
+
+async def db_get_active_queue():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM queue "
+            "WHERE status IN ('running','paused_hours') "
+            "ORDER BY created_at DESC LIMIT 1"
+        ) as c:
+            row = await c.fetchone()
+            return dict(row) if row else None
+
+
+async def db_get_last_queue():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM queue "
+            "ORDER BY created_at DESC LIMIT 1"
+        ) as c:
+            row = await c.fetchone()
+            return dict(row) if row else None
+
+
+async def db_recover_stale_queues():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE queue SET status='done' "
+            "WHERE status IN ('running','paused_hours')"
+        )
+        await db.execute(
+            "UPDATE queue_clients SET status='done' "
+            "WHERE status IN ('running','paused_hours')"
+        )
+        await db.commit()

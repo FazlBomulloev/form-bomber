@@ -1,19 +1,27 @@
 import asyncio
 import json
+import re as _re
 import uuid
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 
 from config import (
     USER_AGENT, CONCURRENCY,
     AI_CONCURRENCY, COOKIE_CONSENT_SCRIPT,
+    WORK_HOUR_START, WORK_HOUR_END, MSK_UTC_OFFSET,
 )
 from models import domain_from_url
 from logger import SiteLogger, _site_logger_var
 from db import (
     db_create_session, db_add_result,
     db_finish_session,
+    db_create_queue, db_add_queue_client,
+    db_get_queue, db_get_queue_clients,
+    db_update_queue_status, db_update_queue_progress,
+    db_update_client_status,
 )
 from ai_provider import ask_ai_sync, collect_full_html
 from form_finder import extract_forms, build_smart_plan
@@ -31,7 +39,126 @@ from calltouch import try_calltouch
 _ai_sem = asyncio.Semaphore(AI_CONCURRENCY)
 _ws_clients: set = set()
 _browser = None
+_pw = None
+_browser_lock = asyncio.Lock()
+_active_queue_id: str | None = None
+_queue_cancel = asyncio.Event()
 LOG_DIR = Path("data/logs")
+
+_MSK = timezone(timedelta(hours=MSK_UTC_OFFSET))
+
+
+def _is_working_hours() -> bool:
+    now = datetime.now(_MSK)
+    start = now.replace(
+        hour=WORK_HOUR_START[0],
+        minute=WORK_HOUR_START[1],
+        second=0, microsecond=0,
+    )
+    end = now.replace(
+        hour=WORK_HOUR_END[0],
+        minute=WORK_HOUR_END[1],
+        second=0, microsecond=0,
+    )
+    return start <= now < end
+
+
+def _seconds_until_work_start() -> float:
+    now = datetime.now(_MSK)
+    next_start = now.replace(
+        hour=WORK_HOUR_START[0],
+        minute=WORK_HOUR_START[1],
+        second=0, microsecond=0,
+    )
+    if now >= next_start:
+        next_start += timedelta(days=1)
+    return (next_start - now).total_seconds()
+
+
+async def _wait_for_working_hours(queue_id: str):
+    if _is_working_hours():
+        return
+    await db_update_queue_status(
+        queue_id, "paused_hours",
+    )
+    wait_secs = _seconds_until_work_start()
+    resume_at = (
+        datetime.now(_MSK)
+        + timedelta(seconds=wait_secs)
+    ).strftime("%H:%M")
+    await _ws_broadcast({
+        "type": "paused",
+        "queue_id": queue_id,
+        "reason": "working_hours",
+        "resume_at_msk": resume_at,
+        "wait_seconds": int(wait_secs),
+    })
+    while not _is_working_hours():
+        if _queue_cancel.is_set():
+            return
+        await asyncio.sleep(30)
+    await db_update_queue_status(queue_id, "running")
+    await _ws_broadcast({
+        "type": "resumed",
+        "queue_id": queue_id,
+    })
+
+
+def parse_proxy(raw: str) -> dict | None:
+    if not raw or not raw.strip():
+        return None
+    raw = raw.strip()
+    if raw.startswith(("http://", "https://", "socks5://")):
+        parsed = urlparse(raw)
+        result = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"}
+        if parsed.username:
+            result["username"] = parsed.username
+        if parsed.password:
+            result["password"] = parsed.password
+        return result
+    parts = raw.split(":")
+    if len(parts) == 4:
+        host, port, user, pwd = parts
+        return {
+            "server": f"http://{host}:{port}",
+            "username": user,
+            "password": pwd,
+        }
+    if len(parts) == 2:
+        return {"server": f"http://{parts[0]}:{parts[1]}"}
+    return None
+
+
+async def _reset_browser():
+    global _browser, _pw
+    _browser = None
+    try:
+        if _pw:
+            await _pw.stop()
+    except Exception:
+        pass
+    _pw = None
+
+
+async def _get_browser():
+    global _browser, _pw
+    async with _browser_lock:
+        if _browser is not None:
+            try:
+                _browser.contexts
+                return _browser
+            except Exception:
+                await _reset_browser()
+        _pw = await async_playwright().start()
+        _browser = await _pw.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features="
+                "AutomationControlled",
+                "--no-sandbox",
+            ],
+        )
+        return _browser
 
 
 async def _ws_broadcast(data: dict):
@@ -207,6 +334,7 @@ async def check_site_v2(
     attempt_no: int = 1,
     max_retries: int = 6,
     prev_hint: dict = None,
+    proxy: dict = None,
 ):
     domain = domain_from_url(url)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -229,26 +357,27 @@ async def check_site_v2(
 
         # ── 1. Браузер ──────────────────────────
         _logger.step("browser", "запуск")
-        global _browser
-        if _browser is None:
-            pw = await async_playwright().start()
-            _browser = await pw.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features="
-                    "AutomationControlled",
-                    "--no-sandbox",
-                ],
-            )
-
-        ctx = await _browser.new_context(
-            user_agent=USER_AGENT,
-            viewport={
-                "width": 1280, "height": 900,
-            },
-            ignore_https_errors=True,
-        )
-        page = await ctx.new_page()
+        ctx_kwargs = {
+            "user_agent": USER_AGENT,
+            "viewport": {"width": 1280, "height": 900},
+            "ignore_https_errors": True,
+        }
+        if proxy:
+            ctx_kwargs["proxy"] = proxy
+        for _br_try in range(2):
+            try:
+                browser = await _get_browser()
+                ctx = await browser.new_context(
+                    **ctx_kwargs,
+                )
+                page = await ctx.new_page()
+                break
+            except Exception:
+                await _reset_browser()
+                if _br_try == 1:
+                    raise
+                _logger.warn("браузер упал, перезапуск")
+                await asyncio.sleep(1)
         step_dir = _logger.site_dir
 
         try:
@@ -650,8 +779,15 @@ async def _process_one(
     email, comment,
     claude_key, rucaptcha_key,
     session_id, sem, max_retries=3,
+    proxy: dict = None,
+    queue_id: str = None,
 ):
     async with sem:
+        if queue_id:
+            await _wait_for_working_hours(queue_id)
+            if _queue_cancel.is_set():
+                return None
+
         prev_hint = None
         for attempt in range(1, max_retries + 1):
             await _ws_broadcast({
@@ -669,6 +805,7 @@ async def _process_one(
                 attempt_no=attempt,
                 max_retries=max_retries,
                 prev_hint=prev_hint,
+                proxy=proxy,
             )
             await db_add_result(
                 session_id, url, result,
@@ -780,3 +917,166 @@ async def run_session(
         )
     )
     return sid
+
+
+# ── Multi-client queue ─────────────────────────
+
+
+async def _run_client(
+    queue_id: str, client: dict,
+    urls: list, claude_key: str,
+    rucaptcha_key: str, max_attempts: int,
+):
+    sid = str(uuid.uuid4())[:8]
+    client_id = client["id"]
+    proxy = parse_proxy(client.get("proxy", ""))
+
+    parts = [
+        client.get("firstname", ""),
+        client.get("lastname", ""),
+    ]
+    label = " ".join(p for p in parts if p)
+    session_name = (
+        f"{label} ({client['phone']})"
+        if label else client["phone"]
+    )
+
+    await db_create_session(
+        sid, session_name, len(urls),
+        queue_id=queue_id,
+        client_id=client_id,
+    )
+    await db_update_client_status(
+        client_id, "running", session_id=sid,
+    )
+
+    await _ws_broadcast({
+        "type": "client_start",
+        "queue_id": queue_id,
+        "client_id": client_id,
+        "session_id": sid,
+        "client_position": client["position"],
+        "client_name": session_name,
+        "total_urls": len(urls),
+    })
+
+    sem = asyncio.Semaphore(CONCURRENCY)
+    tasks = [
+        _process_one(
+            u.strip(),
+            client["phone"],
+            client.get("firstname", ""),
+            client.get("lastname", ""),
+            client.get("patronymic", ""),
+            client.get("email", ""),
+            client.get("comment", ""),
+            claude_key, rucaptcha_key,
+            sid, sem, max_attempts,
+            proxy=proxy,
+            queue_id=queue_id,
+        )
+        for u in urls if u.strip()
+    ]
+    await asyncio.gather(*tasks)
+
+    await db_finish_session(sid)
+    await db_update_client_status(client_id, "done")
+
+    await _ws_broadcast({
+        "type": "client_done",
+        "queue_id": queue_id,
+        "client_id": client_id,
+        "session_id": sid,
+        "client_position": client["position"],
+    })
+    return sid
+
+
+async def _run_queue_bg(queue_id: str):
+    global _active_queue_id
+    _active_queue_id = queue_id
+    _queue_cancel.clear()
+
+    queue = await db_get_queue(queue_id)
+    clients = await db_get_queue_clients(queue_id)
+    urls = json.loads(queue["urls"])
+
+    await db_update_queue_status(queue_id, "running")
+    await _ws_broadcast({
+        "type": "queue_start",
+        "queue_id": queue_id,
+        "total_clients": len(clients),
+        "total_urls": len(urls),
+    })
+
+    start_idx = queue.get("current_client_idx", 0)
+
+    for i, client in enumerate(
+        clients[start_idx:], start=start_idx,
+    ):
+        if _queue_cancel.is_set():
+            break
+
+        await _wait_for_working_hours(queue_id)
+        if _queue_cancel.is_set():
+            break
+
+        await db_update_queue_progress(queue_id, i, i)
+
+        await _run_client(
+            queue_id, client, urls,
+            queue["claude_key"],
+            queue["rucaptcha_key"],
+            queue["max_attempts"],
+        )
+
+        await db_update_queue_progress(
+            queue_id, i + 1, i + 1,
+        )
+
+    final = (
+        "cancelled" if _queue_cancel.is_set()
+        else "done"
+    )
+    await db_update_queue_status(queue_id, final)
+    _active_queue_id = None
+
+    await _ws_broadcast({
+        "type": "queue_done",
+        "queue_id": queue_id,
+        "status": final,
+    })
+
+
+async def run_queue(
+    urls: list, clients: list,
+    claude_key: str = "",
+    rucaptcha_key: str = "",
+    queue_name: str = "",
+    max_attempts: int = 3,
+) -> str:
+    global _active_queue_id
+    if _active_queue_id:
+        raise ValueError("Очередь уже запущена")
+
+    qid = str(uuid.uuid4())[:8]
+
+    await db_create_queue(
+        qid, queue_name or qid, urls,
+        claude_key, rucaptcha_key,
+        max_attempts, len(clients),
+    )
+
+    for i, c in enumerate(clients):
+        await db_add_queue_client(
+            qid, i, c["phone"],
+            c.get("firstname", ""),
+            c.get("lastname", ""),
+            c.get("patronymic", ""),
+            c.get("email", ""),
+            c.get("comment", ""),
+            c.get("proxy", ""),
+        )
+
+    asyncio.create_task(_run_queue_bg(qid))
+    return qid
