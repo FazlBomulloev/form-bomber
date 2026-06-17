@@ -570,12 +570,13 @@ async def _solve_captcha(
 
 async def _inject_captcha_token(
     page, captcha_type, token,
+    is_invisible=False, callback_name=None,
 ):
     log = get_logger()
     try:
         if captcha_type == "recaptcha":
             await page.evaluate(
-                r"""token => {
+                r"""({token, isInvisible, cbName}) => {
                 // Заполняем ВСЕ textarea с ответом
                 const tas = document.querySelectorAll(
                     '#g-recaptcha-response,'
@@ -599,6 +600,35 @@ async def _inject_captcha_token(
                     if (cb && window[cb])
                         window[cb](token);
                 } catch(e) {}
+                // Явный callback по имени из hint
+                if (cbName && window[cbName])
+                    try { window[cbName](token); }
+                    catch(e) {}
+                // Для invisible — попробовать
+                //   grecaptcha.execute()
+                if (isInvisible && window.grecaptcha
+                    && grecaptcha.execute) {
+                    try {
+                        const r = grecaptcha.execute();
+                        if (r && r.then) r.then(t => {
+                            const ta = document
+                                .querySelector(
+                                '#g-recaptcha-response,'
+                                + 'textarea[name='
+                                + '"g-recaptcha-response"]'
+                            );
+                            if (ta) ta.value = t || token;
+                        });
+                    } catch(e) {}
+                }
+                // enterprise invisible execute
+                if (isInvisible && window.grecaptcha
+                    && grecaptcha.enterprise
+                    && grecaptcha.enterprise.execute) {
+                    try {
+                        grecaptcha.enterprise.execute();
+                    } catch(e) {}
+                }
                 // enterprise callback из ___grecaptcha_cfg
                 try {
                     if (window.___grecaptcha_cfg) {
@@ -623,7 +653,13 @@ async def _inject_captcha_token(
                         }
                     }
                 } catch(e) {}
-            }""", token)
+            }""",
+                {
+                    "token": token,
+                    "isInvisible": is_invisible,
+                    "cbName": callback_name,
+                },
+            )
 
         elif captcha_type == "hcaptcha":
             await page.evaluate(
@@ -2438,7 +2474,46 @@ async def handle_captcha(
     page, page_url, rucaptcha_key,
     has_captcha_hint=False,
     captcha_type_hint=None,
+    captcha_hint=None,
 ):
+    # 0. Прямой fast-path по hint из js_extractor
+    if captcha_hint and captcha_hint.get("sitekey"):
+        ctype = captcha_hint.get("type", "recaptcha")
+        skey = captcha_hint["sitekey"]
+        is_enterprise = captcha_hint.get(
+            "is_enterprise", False,
+        )
+        is_invisible = captcha_hint.get(
+            "is_invisible", False,
+        )
+        callback_name = captcha_hint.get("callback")
+
+        if not rucaptcha_key:
+            return "no_key"
+
+        log = get_logger()
+        if log:
+            log.log_captcha(
+                "hint_used",
+                type=ctype,
+                sitekey=skey[:20],
+                invisible=is_invisible,
+            )
+
+        token = await _solve_captcha(
+            ctype, skey, page_url, rucaptcha_key,
+            enterprise=is_enterprise,
+        )
+        if not token:
+            return "solve_failed"
+
+        ok = await _inject_captcha_token(
+            page, ctype, token,
+            is_invisible=is_invisible,
+            callback_name=callback_name,
+        )
+        return "ok" if ok else "inject_failed"
+
     # 1. Математическая капча
     math_res = await _detect_math_captcha(page)
     if math_res == "ok":

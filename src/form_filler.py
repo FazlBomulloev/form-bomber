@@ -1,5 +1,6 @@
 import asyncio
 import re
+import time
 from datetime import datetime, timedelta
 
 from config import PHONE_FALLBACKS
@@ -9,9 +10,6 @@ from browser_utils import (
     step_shot, dismiss_popups,
 )
 from form_finder import resolve_form_el
-
-
-_phone_method_cache: dict = {}
 
 
 def _next_workday():
@@ -725,20 +723,25 @@ async def smart_phone_fill(
         except Exception:
             pass
 
-    ok = len(digits) >= 10
-    if ok:
-        method_used = "fill"
-        if has_mask or has_foreign_code:
-            method_used = "slow_type"
+    # Финальная попытка для упрямых JS-масок,
+    # которые откатывают react_patch_input: подаём
+    # цифры через InputEvent('insertText') — маски
+    # ждут именно такой формат пользовательского
+    # ввода (beforeinput + input).
+    if len(digits) < 10:
         try:
-            from models import domain_from_url
-            _phone_method_cache[
-                domain_from_url(
-                    page.url
-                )
-            ] = method_used
+            await _input_event_phone(
+                page, el, phone_short,
+            )
+            await asyncio.sleep(0.3)
+            final = await page.evaluate(
+                "el => el.value || ''", el,
+            ) or ""
+            digits = re.sub(r'[^\d]', '', final)
         except Exception:
             pass
+
+    ok = len(digits) >= 10
     if log:
         log.log_action(
             "phone", sel, final[:30],
@@ -747,6 +750,51 @@ async def smart_phone_fill(
             else f"только {len(digits)} цифр",
         )
     return ok
+
+
+async def _input_event_phone(page, el, digits):
+    """Эмулирует пользовательский ввод через InputEvent,
+    добавляя цифры по одной. Работает для JS-масок,
+    подписанных на 'beforeinput'/'input', которые
+    игнорируют прямую запись через native setter."""
+    await page.evaluate(r"""([el, digits]) => {
+        try {
+            const proto = HTMLInputElement.prototype;
+            const desc = Object.getOwnPropertyDescriptor(
+                proto, 'value');
+            const setVal = (v) => {
+                if (desc && desc.set) desc.set.call(el, v);
+                else el.value = v;
+            };
+            el.focus();
+            setVal('');
+            el.dispatchEvent(new Event('input',
+                {bubbles: true}));
+            for (const ch of digits) {
+                try {
+                    el.dispatchEvent(new InputEvent(
+                        'beforeinput',
+                        {inputType: 'insertText',
+                         data: ch, bubbles: true,
+                         cancelable: true}));
+                } catch (_) {}
+                setVal((el.value || '') + ch);
+                try {
+                    el.dispatchEvent(new InputEvent(
+                        'input',
+                        {inputType: 'insertText',
+                         data: ch, bubbles: true}));
+                } catch (_) {
+                    el.dispatchEvent(new Event('input',
+                        {bubbles: true}));
+                }
+            }
+            el.dispatchEvent(new Event('change',
+                {bubbles: true}));
+            el.dispatchEvent(new Event('blur',
+                {bubbles: true}));
+        } catch (e) {}
+    }""", [el, digits])
 
 
 async def _select_first(page, sel, sel_type="native"):
@@ -1077,6 +1125,53 @@ async def _prefill_date_fields(
         return 0
 
 
+async def _looks_like_phone_field(page, el) -> bool:
+    """Защита от случая, когда AI/эвристика подсунула
+    под `phone` нерелевантное поле (выбор клиники,
+    адрес и т.п.). Истина если поле похоже на телефон
+    хотя бы по одному признаку: type=tel, inputmode,
+    name/id/placeholder/aria-label содержит phone/tel/
+    телефон/моб."""
+    if el is None:
+        return False
+    try:
+        return await page.evaluate(r"""el => {
+            try {
+                if (!el || el.tagName !== 'INPUT')
+                    return false;
+                const t = (el.type || '').toLowerCase();
+                if (t === 'tel') return true;
+                const im = (
+                    el.getAttribute('inputmode') || ''
+                ).toLowerCase();
+                if (im === 'tel' || im === 'numeric')
+                    return true;
+                const haystack = [
+                    el.name, el.id,
+                    el.placeholder,
+                    el.getAttribute('aria-label'),
+                    el.getAttribute('data-field'),
+                    el.getAttribute('data-name'),
+                    el.getAttribute('autocomplete'),
+                    el.className,
+                ].filter(Boolean).join(' ').toLowerCase();
+                if (/phone|телеф|моб|\btel\b/.test(haystack))
+                    return true;
+                // Маскированный шаблон в value/placeholder
+                const sample = (
+                    (el.value || '')
+                    + ' '
+                    + (el.placeholder || '')
+                );
+                if (/\+\s*7|\(\s*\d{3}|_{3,}/.test(sample))
+                    return true;
+                return false;
+            } catch (e) { return false; }
+        }""", el)
+    except Exception:
+        return False
+
+
 async def _heuristic_fill_phone(
     page, phone, form_el=None
 ):
@@ -1098,6 +1193,8 @@ async def execute_action_plan(
     firstname, lastname, patronymic,
     email, comment,
     form_selector=None, step_dir=None,
+    honeypots=None,
+    csrf_token=None,
 ):
     log = get_logger()
     form_el = await resolve_form_el(
@@ -1106,6 +1203,16 @@ async def execute_action_plan(
     filled = []
     phone_ok = False
     submit_sel = None
+
+    # Honeypot-селекторы из Phase 1 расширенного output
+    honeypot_set = set(honeypots or [])
+    # CSRF-токен: НЕ трогать селектор даже в
+    # fill_all_empty_fields
+    csrf_sel = None
+    if csrf_token and isinstance(csrf_token, dict):
+        csrf_sel = csrf_token.get("selector")
+    if csrf_sel:
+        honeypot_set.add(csrf_sel)
 
     if form_el:
         for _ in range(10):
@@ -1146,11 +1253,40 @@ async def execute_action_plan(
         if not sel:
             continue
 
+        # Пропускаем honeypot/csrf-селекторы
+        if sel in honeypot_set:
+            if log:
+                log.warn(
+                    f"пропуск honeypot/csrf: {sel}"
+                )
+            continue
+
         if action == "fill":
             if field == "phone":
-                ok = await smart_phone_fill(
-                    page, sel, phone, form_el
+                # Защита: бывает AI/эвристика подсовывает
+                # под phone несвязанное поле (например
+                # input выбора филиала). Проверяем что
+                # элемент действительно похож на телефон.
+                target_el = await find_el(page, sel)
+                phone_target_ok = (
+                    target_el is not None
+                    and await _looks_like_phone_field(
+                        page, target_el,
+                    )
                 )
+                if not phone_target_ok:
+                    if log:
+                        log.warn(
+                            f"phone target не подходит "
+                            f"({sel!r}), фолбэк на эвристику"
+                        )
+                    ok = await _heuristic_fill_phone(
+                        page, phone, form_el,
+                    )
+                else:
+                    ok = await smart_phone_fill(
+                        page, sel, phone, form_el
+                    )
                 if ok:
                     phone_ok = True
                     filled.append("phone")
@@ -1241,6 +1377,7 @@ async def execute_action_plan(
         "phone_ok": phone_ok,
         "submit_sel": submit_sel,
         "form_el": form_el,
+        "honeypots": list(honeypot_set),
     }
 
 
@@ -1426,8 +1563,10 @@ async def fill_all_empty_fields(
     firstname, lastname, patronymic,
     email, comment,
     form_el=None,
+    honeypots=None,
 ):
     log = get_logger()
+    honeypot_set = set(honeypots or [])
     try:
         empties = await page.evaluate(r"""root => {
             const scope = root || document;
@@ -1453,6 +1592,30 @@ async def fill_all_empty_fields(
                 + 'textarea, select'
             )) {
                 if (!isShown(el)) continue;
+                // === Honeypot detection ===
+                // Off-screen via position/coords
+                try {
+                    const r = el.getBoundingClientRect();
+                    const st = getComputedStyle(el);
+                    if (r.left < -1000 || r.top < -1000)
+                        continue;
+                    if (st.position === 'absolute'
+                        && parseFloat(st.left) < -500)
+                        continue;
+                    if (el.getAttribute('tabindex') === '-1'
+                        && (el.name || '').match(
+                            /website|url|fax|address2|honeypot|hp_/i))
+                        continue;
+                    // CSS-classed honeypot signatures
+                    const hsig = (
+                        (el.name||'') + ' '
+                        + (el.id||'') + ' '
+                        + (el.className||'')
+                    ).toLowerCase();
+                    if (/honey|hp_|trap|gotcha|fakefield/
+                        .test(hsig))
+                        continue;
+                } catch(e) {}
                 const val = (
                     el.value || ''
                 ).trim();
@@ -1511,6 +1674,14 @@ async def fill_all_empty_fields(
         }""", form_el)
     except Exception:
         return 0
+
+    # Финальная фильтрация honeypot/csrf
+    # по селекторам из Phase 1
+    if honeypot_set:
+        empties = [
+            f for f in (empties or [])
+            if f.get("sel") not in honeypot_set
+        ]
 
     fixed = 0
     for f in (empties or []):
@@ -1694,6 +1865,7 @@ async def submit_with_retry(
         page, form_el,
     )
     pre_url = page.url
+    prev_err_match = None
 
     for attempt in range(1, max_submits + 1):
         if log:
@@ -1728,22 +1900,33 @@ async def submit_with_retry(
         )
         state = dom.get("state", "unchanged")
 
-        if state == "unchanged":
-            await asyncio.sleep(2)
-            post_url2 = page.url
-            url_changed2 = (
-                pre_url.rstrip("/")
-                != post_url2.rstrip("/")
-            )
-            dom2 = await detect_submission_result(
-                page, form_el, pre_text,
-                url_changed=url_changed2,
-                net_listener=net_listener,
-            )
-            s2 = dom2.get("state", "unchanged")
-            if s2 != "unchanged":
-                dom = dom2
-                state = s2
+        # Поллим до 10с, пока сетевой/CMS-сигнал не
+        # подтвердит результат. wpcf7 и аналогичные
+        # CMS AJAX-запросы прилетают позже первичной
+        # detection (zubnoystandart: POST на /wp-json/
+        # contact-form-7/ приходил через ~16с после
+        # submit).
+        if state in ("unchanged", "likely_failed"):
+            poll_deadline = time.monotonic() + 10
+            while time.monotonic() < poll_deadline:
+                await asyncio.sleep(0.7)
+                post_url2 = page.url
+                url_changed2 = (
+                    pre_url.rstrip("/")
+                    != post_url2.rstrip("/")
+                )
+                dom2 = await detect_submission_result(
+                    page, form_el, pre_text,
+                    url_changed=url_changed2,
+                    net_listener=net_listener,
+                )
+                s2 = dom2.get("state", "unchanged")
+                if s2 not in (
+                    "unchanged", "likely_failed",
+                ):
+                    dom = dom2
+                    state = s2
+                    break
 
         if state == "likely_success":
             state = "success"
@@ -1760,11 +1943,22 @@ async def submit_with_retry(
         if state == "success":
             return dom
 
-        # Проверка капчи после submit
+        # Проверка капчи после submit (на любой попытке).
+        # Не решаем капчу заново, если submit упал в ту же
+        # error, что и в прошлый раз — капча тут точно
+        # не виновата (z-32 кейс: тратили рукапчу впустую).
+        cur_match_for_cap = (
+            dom.get("match", "") or ""
+        ).strip()
+        skip_captcha_loop = (
+            state == "error"
+            and prev_err_match is not None
+            and cur_match_for_cap == prev_err_match
+        )
         if state in (
             "unchanged", "error",
             "captcha_required",
-        ) and attempt == 1:
+        ) and not skip_captcha_loop:
             from captcha import (
                 handle_captcha,
                 handle_post_submit_captcha,
@@ -1900,10 +2094,23 @@ async def submit_with_retry(
         if state in (
             "validation_error", "error",
         ) and attempt < max_submits:
+            cur_match = (dom.get("match", "") or "").strip()
+            if (
+                prev_err_match is not None
+                and cur_match == prev_err_match
+            ):
+                if log:
+                    log.warn(
+                        f"submit #{attempt}: та же ошибка "
+                        f"({cur_match[:60]!r}), "
+                        f"повтор бесполезен"
+                    )
+                return dom
+            prev_err_match = cur_match
             if log:
                 log.warn(
                     f"submit #{attempt}: {state} "
-                    f"({dom.get('match', '')}), "
+                    f"({cur_match}), "
                     f"пробуем исправить"
                 )
             hints = await get_invalid_field_hint(

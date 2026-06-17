@@ -1,6 +1,10 @@
+import asyncio
 import csv
 import io
+import re
+import zipfile
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Request, UploadFile, WebSocket, WebSocketDisconnect
@@ -17,10 +21,10 @@ from db import (
     db_get_sessions, db_get_results,
     db_get_active_queue, db_get_last_queue, db_get_queue_clients,
 )
-from models import profiles_load, profiles_save
+import runner
 from runner import (
-    run_session, run_queue,
-    _ws_clients, _queue_cancel, _active_queue_id,
+    run_session, run_queue, force_stop_all,
+    _ws_clients, _logs_ttl_loop, LOG_DIR,
 )
 
 
@@ -29,7 +33,15 @@ async def lifespan(app):
     await db_init()
     await db_recover_stale()
     await db_recover_stale_queues()
-    yield
+    ttl_task = asyncio.create_task(_logs_ttl_loop())
+    try:
+        yield
+    finally:
+        ttl_task.cancel()
+        try:
+            await ttl_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 app = FastAPI(lifespan=lifespan)
@@ -183,33 +195,6 @@ async def api_session_export(sid: str):
     )
 
 
-@app.get("/api/profiles")
-async def api_profiles():
-    return profiles_load()
-
-
-@app.get("/api/profiles/count")
-async def api_profiles_count():
-    p = profiles_load()
-    return {"count": len(p)}
-
-
-@app.delete("/api/profiles/{domain:path}")
-async def api_profile_delete(domain: str):
-    profiles = profiles_load()
-    if domain in profiles:
-        del profiles[domain]
-        profiles_save(profiles)
-        return {"deleted": domain}
-    return {"error": "не найден"}
-
-
-@app.delete("/api/profiles")
-async def api_profiles_clear():
-    profiles_save({})
-    return {"cleared": True}
-
-
 @app.post("/api/queue/start")
 async def api_queue_start(req: StartQueueRequest):
     if not req.urls:
@@ -280,11 +265,77 @@ async def api_last_queue():
 
 @app.post("/api/queue/stop")
 async def api_queue_stop():
-    from runner import _queue_cancel, _active_queue_id
-    if _active_queue_id:
-        _queue_cancel.set()
-        return {"ok": True, "queue_id": _active_queue_id}
-    return {"error": "Нет активной очереди"}
+    qid = runner._active_queue_id
+    if not qid:
+        return {"error": "Нет активной очереди"}
+    await force_stop_all()
+    return {"ok": True, "queue_id": qid}
+
+
+@app.get("/api/logs/download-all")
+async def api_logs_download_all():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(
+        buf, "w", zipfile.ZIP_DEFLATED,
+    ) as zf:
+        if LOG_DIR.exists():
+            for log_file in LOG_DIR.rglob("run.log"):
+                arcname = log_file.relative_to(
+                    LOG_DIR,
+                ).as_posix()
+                zf.write(log_file, arcname)
+    buf.seek(0)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                f'attachment; '
+                f'filename="logs_{ts}.zip"'
+            ),
+        },
+    )
+
+
+def _safe_domain(domain: str) -> str:
+    return re.sub(r'[^a-zA-Z0-9._-]', '_', domain)
+
+
+@app.get("/api/sessions/{sid}/logs")
+async def api_session_logs(sid: str):
+    sid_dir = LOG_DIR / sid
+    if not sid_dir.exists():
+        return []
+    items = []
+    for d in sorted(sid_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        run_log = d / "run.log"
+        if not run_log.exists():
+            continue
+        st = run_log.stat()
+        items.append({
+            "domain": d.name,
+            "size": st.st_size,
+            "mtime": st.st_mtime,
+        })
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return items
+
+
+@app.get("/api/sessions/{sid}/logs/{domain}")
+async def api_session_log(sid: str, domain: str):
+    safe = _safe_domain(domain)
+    log_file = LOG_DIR / sid / safe / "run.log"
+    if not log_file.exists():
+        return JSONResponse(
+            {"error": "лог не найден"}, status_code=404,
+        )
+    return FileResponse(
+        str(log_file),
+        media_type="text/plain; charset=utf-8",
+    )
 
 
 @app.post("/api/clients/parse-csv")

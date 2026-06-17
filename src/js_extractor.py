@@ -1,17 +1,32 @@
-"""JS-код для извлечения структуры формы из DOM."""
+"""JS-код для извлечения структуры формы из DOM.
+
+v2: Chromium-style scoring (autofill-inspired):
+    - Каждое поле оценивается по нескольким signal-источникам
+      с приоритетами: autocomplete > type > inputmode > data-* >
+      name > label > aria-label > placeholder > class > id.
+    - Роль выбирается argmax по confidence, если выше threshold 0.5.
+    - Rationalization pass: дедуп, reject login/newsletter/search,
+      single text_unknown + phone → name.
+    - Расширенный output: captcha_hint, honeypots, csrf_token,
+      validation, mask, alternatives, submit_strategy.
+
+Backward compat (для form_finder.build_smart_plan):
+    - keys: fields[role,selector], form_selector, submit_selector, source.
+    - roles: phone, name, firstname, lastname, patronymic, email,
+      comment, date, checkbox_consent, dropdown, radio.
+"""
 
 from typing import Optional
 from logger import get_logger
 
 FORM_EXTRACTOR_JS = r"""() => {
+    // ───── helpers ────────────────────────────────────
     function isVisible(el) {
         if (!el) return false;
         const st = getComputedStyle(el);
         if (st.display === 'none'
-            || st.visibility === 'hidden')
-            return false;
-        if (parseFloat(st.opacity || '1') < 0.05)
-            return false;
+            || st.visibility === 'hidden') return false;
+        if (parseFloat(st.opacity || '1') < 0.05) return false;
         const r = el.getBoundingClientRect();
         return r.width > 6 && r.height > 6;
     }
@@ -23,30 +38,24 @@ FORM_EXTRACTOR_JS = r"""() => {
             catch(e) { return '#' + el.id; }
         }
         const df = el.getAttribute('data-field');
-        if (df)
-            return el.tagName.toLowerCase()
-                + '[data-field="' + df + '"]';
+        if (df) return el.tagName.toLowerCase()
+            + '[data-field="' + df + '"]';
         const dn = el.getAttribute('data-name');
-        if (dn)
-            return el.tagName.toLowerCase()
-                + '[data-name="' + dn + '"]';
+        if (dn) return el.tagName.toLowerCase()
+            + '[data-name="' + dn + '"]';
         if (el.name) {
             const tag = el.tagName.toLowerCase();
-            const sel = tag
-                + '[name="' + el.name + '"]';
+            const sel = tag + '[name="' + el.name + '"]';
             const scope = el.closest('form')
                 || el.closest('[role="dialog"]')
                 || document;
-            const matches =
-                scope.querySelectorAll(sel);
+            const matches = scope.querySelectorAll(sel);
             if (matches.length === 1) return sel;
             const tp = (el.type||'').toLowerCase();
             if (tp) {
-                const sel2 = tag
-                    + '[name="' + el.name
+                const sel2 = tag + '[name="' + el.name
                     + '"][type="' + tp + '"]';
-                if (scope.querySelectorAll(sel2)
-                        .length === 1)
+                if (scope.querySelectorAll(sel2).length === 1)
                     return sel2;
             }
         }
@@ -54,8 +63,7 @@ FORM_EXTRACTOR_JS = r"""() => {
         if (ph && ph.length < 40) {
             const sel = el.tagName.toLowerCase()
                 + '[placeholder="' + ph + '"]';
-            const scope = el.closest('form')
-                || document;
+            const scope = el.closest('form') || document;
             if (scope.querySelectorAll(sel).length <= 2)
                 return sel;
         }
@@ -65,25 +73,19 @@ FORM_EXTRACTOR_JS = r"""() => {
         if (tp && cls) {
             try {
                 return el.tagName.toLowerCase()
-                    + '[type="' + tp + '"].'
-                    + CSS.escape(cls);
+                    + '[type="' + tp + '"].' + CSS.escape(cls);
             } catch(e) {}
         }
         const ac = el.getAttribute('autocomplete');
-        if (ac)
-            return el.tagName.toLowerCase()
-                + '[autocomplete="' + ac + '"]';
-        const parent = el.closest('form')
-            || el.parentElement;
+        if (ac) return el.tagName.toLowerCase()
+            + '[autocomplete="' + ac + '"]';
+        const parent = el.closest('form') || el.parentElement;
         if (parent) {
             const tag = el.tagName.toLowerCase();
             const siblings = Array.from(
-                parent.querySelectorAll(tag)
-            );
+                parent.querySelectorAll(tag));
             const idx = siblings.indexOf(el) + 1;
-            if (idx > 0)
-                return tag
-                    + ':nth-of-type(' + idx + ')';
+            if (idx > 0) return tag + ':nth-of-type(' + idx + ')';
         }
         return null;
     }
@@ -92,235 +94,736 @@ FORM_EXTRACTOR_JS = r"""() => {
         if (el.id) {
             try {
                 const lbl = document.querySelector(
-                    'label[for="'
-                    + CSS.escape(el.id) + '"]'
-                );
-                if (lbl)
-                    return (lbl.innerText||'')
-                        .trim().substring(0, 80);
+                    'label[for="' + CSS.escape(el.id) + '"]');
+                if (lbl) return (lbl.innerText||'')
+                    .trim().substring(0, 120);
             } catch(e) {}
         }
         const closest = el.closest('label');
         if (closest) {
             const t = (closest.innerText||'').trim();
-            if (t.length < 80) return t;
+            if (t.length < 120) return t;
         }
         const al = el.getAttribute('aria-label');
-        if (al) return al.trim().substring(0, 80);
+        if (al) return al.trim().substring(0, 120);
+        const ab = el.getAttribute('aria-labelledby');
+        if (ab) {
+            try {
+                const ref = document.getElementById(ab);
+                if (ref) return (ref.innerText||'')
+                    .trim().substring(0, 120);
+            } catch(e) {}
+        }
         return '';
+    }
+
+    // ───── Chromium-style scoring ─────────────────────
+    // Веса источников signal'ов (упорядочены по приоритету).
+    const W = {
+        autocomplete: 10,
+        type:          8,
+        inputmode:     8,
+        data_attr:     6,
+        name:          5,
+        label:         5,
+        aria:          4,
+        placeholder:   3,
+        mask:          3,
+        pattern:       2,
+        class:         2,
+        id:            2,
+    };
+    const ROLE_NORM = 14;   // нормализатор для confidence
+    const ROLE_THRESHOLD = 0.5;
+
+    // Паттерны по ролям. Каждый паттерн — RegExp.
+    // Чёткие autocomplete-значения проверяются отдельно.
+    const PATTERNS = {
+        phone: [
+            /\bphone\b/i, /\btel(?:ephone)?\b/i,
+            /\bmobile\b/i, /\bcell\b/i,
+            /телефон/i, /\bтел\b/i, /моб/i,
+            /phonemask/i, /tildaspec-phone/i,
+            /номер.{0,3}тел/i,
+        ],
+        email: [
+            /e-?mail/i, /почт/i, /электронн/i,
+        ],
+        firstname: [
+            /first.?name/i, /given.?name/i,
+            /^имя$/i, /\bимя\b/i,
+        ],
+        lastname: [
+            /last.?name/i, /surname/i, /family.?name/i,
+            /фамили/i,
+        ],
+        patronymic: [
+            /patronymic/i, /middle.?name/i, /отчеств/i,
+        ],
+        name: [
+            /\bname\b/i, /\bfio\b/i, /\bфио\b/i,
+            /ваше.?имя/i, /full.?name/i, /полное.?имя/i,
+            /\bимя\b/i, /\bимени/i,
+        ],
+        comment: [
+            /comment/i, /message/i, /текст/i,
+            /коммент/i, /сообщ/i, /вопрос/i,
+            /пожелан/i, /опишите/i,
+        ],
+        date: [
+            /\bdate\b/i, /дата/i, /когда/i,
+            /удобн.{0,8}время/i,
+        ],
+        company: [
+            /company/i, /компани/i, /организаци/i,
+            /firm/i, /юрлиц/i,
+        ],
+        address: [
+            /address/i, /адрес/i, /city/i, /город/i,
+        ],
+    };
+
+    // autocomplete → role (точные значения Chromium spec)
+    const AC_MAP = {
+        'tel': 'phone',
+        'tel-national': 'phone',
+        'tel-local': 'phone',
+        'mobile tel': 'phone',
+        'email': 'email',
+        'given-name': 'firstname',
+        'family-name': 'lastname',
+        'additional-name': 'patronymic',
+        'name': 'name',
+        'cc-name': 'name',
+        'organization': 'company',
+        'street-address': 'address',
+        'address-line1': 'address',
+        'bday': 'date',
+    };
+
+    function scoreRole(el, signals) {
+        const scores = {};
+        function add(role, w) {
+            scores[role] = (scores[role] || 0) + w;
+        }
+
+        // 1. autocomplete (highest priority)
+        const ac = signals.ac;
+        if (ac && AC_MAP[ac]) add(AC_MAP[ac], W.autocomplete);
+
+        // 2. type
+        if (signals.type === 'tel') add('phone', W.type);
+        if (signals.type === 'email') add('email', W.type);
+        if (signals.type === 'date'
+            || signals.type === 'datetime-local')
+            add('date', W.type);
+
+        // 3. inputmode
+        if (signals.im === 'tel') add('phone', W.inputmode);
+        if (signals.im === 'email') add('email', W.inputmode);
+        if (signals.im === 'numeric'
+            && (/phone|tel|телефон/.test(signals.name
+                + ' ' + signals.label)))
+            add('phone', W.inputmode / 2);
+
+        // 4. data-* (data-field, data-name, data-tilda-rule)
+        const dataBag = (
+            signals.df + ' ' + signals.dn
+            + ' ' + signals.rule);
+        if (signals.rule === 'phone') add('phone', W.data_attr);
+        if (signals.rule === 'name') add('name', W.data_attr);
+        if (signals.rule === 'email') add('email', W.data_attr);
+        if (dataBag.trim()) {
+            for (const [role, pats] of Object.entries(PATTERNS)) {
+                for (const p of pats) {
+                    if (p.test(dataBag)) {
+                        add(role, W.data_attr);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 5-10. text-based sources
+        const sources = [
+            ['name',        signals.name,        W.name],
+            ['label',       signals.label,       W.label],
+            ['aria',        signals.aria,        W.aria],
+            ['placeholder', signals.ph,          W.placeholder],
+            ['class',       signals.cls,         W.class],
+            ['id',          signals.id,          W.id],
+        ];
+        for (const [, txt, weight] of sources) {
+            if (!txt) continue;
+            for (const [role, pats] of Object.entries(PATTERNS)) {
+                for (const p of pats) {
+                    if (p.test(txt)) {
+                        add(role, weight);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 11. mask in placeholder (high signal для phone)
+        if (signals.ph && /\+7|\+9|\(\d{2,4}\)|___[ -]___/
+            .test(signals.ph))
+            add('phone', W.mask);
+
+        // 12. pattern attribute (бонус если намекает на формат)
+        if (signals.pattern) {
+            const pat = signals.pattern;
+            if (/\\d.{0,3}\\d/.test(pat)
+                && /(?:tel|phone)/.test(signals.name
+                    + ' ' + signals.label))
+                add('phone', W.pattern);
+            if (/@/.test(pat)) add('email', W.pattern);
+        }
+
+        return scores;
     }
 
     function classifyField(el) {
         const tag = el.tagName.toLowerCase();
         const type = (el.type||'').toLowerCase();
-        const name = (el.name||'').toLowerCase();
-        const id = (el.id||'').toLowerCase();
-        const ph = (el.placeholder||'').toLowerCase();
-        const ac = (el.getAttribute('autocomplete')
-            ||'').toLowerCase();
-        const cls = (el.className||'').toString()
-            .toLowerCase();
-        const im = (el.inputMode||'').toLowerCase();
-        const label = getLabel(el).toLowerCase();
-        const df = (el.getAttribute('data-field')
-            ||'').toLowerCase();
-        const dn = (el.getAttribute('data-name')
-            ||'').toLowerCase();
-        const rule = (el.getAttribute(
-            'data-tilda-rule')||'').toLowerCase();
-        const sig = [
-            name,id,ph,ac,cls,label,df,dn,rule
-        ].join(' ');
+        const signals = {
+            type,
+            name:    (el.name||'').toLowerCase(),
+            id:      (el.id||'').toLowerCase(),
+            ph:      (el.placeholder||'').toLowerCase(),
+            ac:      (el.getAttribute('autocomplete')||'')
+                        .toLowerCase().trim(),
+            cls:     (el.className||'').toString().toLowerCase(),
+            im:      (el.inputMode||'').toLowerCase(),
+            label:   getLabel(el).toLowerCase(),
+            aria:    (el.getAttribute('aria-label')||'')
+                        .toLowerCase(),
+            df:      (el.getAttribute('data-field')||'')
+                        .toLowerCase(),
+            dn:      (el.getAttribute('data-name')||'')
+                        .toLowerCase(),
+            rule:    (el.getAttribute('data-tilda-rule')||'')
+                        .toLowerCase(),
+            pattern: el.getAttribute('pattern') || '',
+        };
 
-        if (type==='tel' || im==='tel'
-            || ac==='tel') return 'phone';
-        if (/phone|tel[^a-z]|телефон|номер тел|mobile|моб|phonemask|tildaspec-phone/.test(sig))
-            return 'phone';
-        if (/\+7|\(\d{3}\)|___/.test(ph))
-            return 'phone';
-        if (rule === 'phone') return 'phone';
-
-        if (type==='email' || ac==='email')
-            return 'email';
-        if (/e-?mail|почт|электронн/.test(sig))
-            return 'email';
-
-        if (tag === 'textarea') return 'comment';
-        if (/comment|message|коммент|сообщ|вопрос/.test(sig))
-            return 'comment';
-
-        if (/patronymic|middle.?name|отчеств/.test(sig))
-            return 'patronymic';
-        if (/last.?name|surname|family.?name|фамили/.test(sig))
-            return 'lastname';
-        if (/first.?name|given.?name|^имя$/.test(sig.trim()))
-            return 'firstname';
-        if (rule === 'name') return 'name';
-        if (/\bname\b|имя|фио|ваше имя/.test(sig))
-            return 'name';
-        if (ac==='name' || ac==='given-name')
-            return 'name';
-
-        if (type==='date' || /дата|date/.test(sig))
-            return 'date';
-
+        // Special tags first
+        if (tag === 'textarea') {
+            return {
+                role: 'comment', confidence: 0.9,
+                alternatives: [], signals,
+            };
+        }
+        if (tag === 'select') {
+            return {
+                role: 'dropdown', confidence: 0.95,
+                alternatives: [], signals,
+            };
+        }
+        if (type === 'radio') {
+            return {
+                role: 'radio', confidence: 0.95,
+                alternatives: [], signals,
+            };
+        }
         if (type === 'checkbox') {
-            if (/policy|consent|agree|соглас|политик|персональн|обработк|конфиденц|privacy/.test(sig))
-                return 'checkbox_consent';
-            const allCb = (el.closest('form')
-                || document).querySelectorAll(
-                    'input[type="checkbox"]'
-                );
-            if (allCb.length === 1)
-                return 'checkbox_consent';
-            return 'checkbox_other';
+            const sigStr = [
+                signals.name, signals.id, signals.cls,
+                signals.label, signals.aria,
+            ].join(' ');
+            const consent =
+                /policy|consent|agree|terms|privacy|gdpr|соглас|политик|персональн|обработк|конфиденц/
+                    .test(sigStr);
+            return {
+                role: consent
+                    ? 'checkbox_consent' : 'checkbox_other',
+                confidence: consent ? 0.85 : 0.6,
+                alternatives: [], signals,
+            };
         }
 
-        if (type === 'radio') return 'radio';
-        if (type==='text' || type==='' || !type)
-            return 'text_unknown';
-        return 'unknown';
+        // Scoring
+        const scores = scoreRole(el, signals);
+        const ranked = Object.entries(scores)
+            .sort((a, b) => b[1] - a[1]);
+
+        if (!ranked.length) {
+            // fallback по type
+            if (type === 'tel') return {
+                role: 'phone', confidence: 0.7,
+                alternatives: [], signals};
+            if (type === 'email') return {
+                role: 'email', confidence: 0.7,
+                alternatives: [], signals};
+            if (type === 'date') return {
+                role: 'date', confidence: 0.8,
+                alternatives: [], signals};
+            return {
+                role: 'text_unknown', confidence: 0.0,
+                alternatives: [], signals,
+            };
+        }
+
+        const [topRole, topScore] = ranked[0];
+        const confidence = Math.min(1, topScore / ROLE_NORM);
+        const alternatives = ranked.slice(1, 4).map(
+            ([r, s]) => [r, Math.min(1, s / ROLE_NORM)]);
+
+        if (confidence < ROLE_THRESHOLD) {
+            return {
+                role: 'text_unknown',
+                confidence: confidence,
+                alternatives: [[topRole, confidence],
+                    ...alternatives],
+                signals,
+            };
+        }
+
+        return {role: topRole, confidence, alternatives, signals};
     }
 
-    function scoreForm(container, fields) {
+    // ───── extra extractors ──────────────────────────
+    function extractMask(el, signals) {
+        const ph = el.placeholder || '';
+        if (/\+7|\+9|\(\d{2,4}\)|___|XXX|999/.test(ph))
+            return ph;
+        const mask = el.getAttribute('data-mask')
+            || el.getAttribute('data-format')
+            || el.getAttribute('data-input-mask');
+        return mask || null;
+    }
+
+    function extractValidation(el) {
+        const v = {};
+        const p = el.getAttribute('pattern');
+        if (p) v.pattern = p;
+        const minL = el.getAttribute('minlength');
+        if (minL) v.minLength = parseInt(minL, 10);
+        const maxL = el.getAttribute('maxlength');
+        if (maxL) v.maxLength = parseInt(maxL, 10);
+        const mn = el.getAttribute('min');
+        if (mn) v.min = mn;
+        const mx = el.getAttribute('max');
+        if (mx) v.max = mx;
+        return Object.keys(v).length ? v : null;
+    }
+
+    function detectCaptcha(container) {
+        const root = container || document;
+
+        // reCAPTCHA
+        const rcEl = root.querySelector(
+            '.g-recaptcha,[data-sitekey],'
+            + 'iframe[src*="recaptcha"]');
+        if (rcEl) {
+            let sk = rcEl.getAttribute('data-sitekey');
+            if (!sk) {
+                const inner = root.querySelector(
+                    '.g-recaptcha[data-sitekey]');
+                if (inner) sk = inner.getAttribute('data-sitekey');
+            }
+            const size = (rcEl.getAttribute('data-size')||'')
+                .toLowerCase();
+            const cb = rcEl.getAttribute('data-callback');
+            const isEnt = !!root.querySelector(
+                'script[src*="recaptcha/enterprise"]')
+                || /enterprise/i.test(
+                    (rcEl.getAttribute('data-action')||''));
+            if (sk || rcEl.tagName === 'IFRAME') {
+                return {
+                    type: 'recaptcha',
+                    sitekey: sk || null,
+                    is_invisible: size === 'invisible',
+                    is_enterprise: isEnt,
+                    callback: cb || null,
+                };
+            }
+        }
+
+        // hCaptcha
+        const hc = root.querySelector(
+            '.h-captcha,iframe[src*="hcaptcha"]');
+        if (hc) {
+            return {
+                type: 'hcaptcha',
+                sitekey: hc.getAttribute('data-sitekey') || null,
+                is_invisible: (
+                    hc.getAttribute('data-size')||'') === 'invisible',
+                is_enterprise: false,
+                callback: hc.getAttribute('data-callback') || null,
+            };
+        }
+
+        // Cloudflare Turnstile
+        const ts = root.querySelector(
+            '.cf-turnstile,iframe[src*="turnstile"]');
+        if (ts) {
+            return {
+                type: 'turnstile',
+                sitekey: ts.getAttribute('data-sitekey') || null,
+                is_invisible: false,
+                is_enterprise: false,
+                callback: ts.getAttribute('data-callback') || null,
+            };
+        }
+
+        // Yandex SmartCaptcha
+        const yc = root.querySelector(
+            '.smart-captcha,[data-sitekey][class*="smart"],'
+            + 'iframe[src*="smartcaptcha"]');
+        if (yc) {
+            return {
+                type: 'yandex',
+                sitekey: yc.getAttribute('data-sitekey') || null,
+                is_invisible: yc.getAttribute('data-invisible')
+                    === 'true',
+                is_enterprise: false,
+                callback: yc.getAttribute('data-callback') || null,
+            };
+        }
+
+        return null;
+    }
+
+    function detectHoneypots(container) {
+        const root = container || document;
+        const out = [];
+        for (const el of root.querySelectorAll(
+            'input:not([type="hidden"]):not([type="submit"])'
+            + ':not([type="button"])')) {
+            const st = getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            const hiddenCss = (
+                st.display === 'none'
+                || st.visibility === 'hidden'
+                || parseFloat(st.opacity||'1') < 0.05
+                || r.width < 2 || r.height < 2);
+            const offscreen = (
+                Math.abs(parseFloat(st.left)) > 9000
+                || Math.abs(parseFloat(st.top)) > 9000);
+            const name = (el.name||'').toLowerCase();
+            const id = (el.id||'').toLowerCase();
+            const sig = name + ' ' + id;
+            const trapName = /honeypot|website|url|fax|bot|trap|hp_/
+                .test(sig);
+            if (hiddenCss || offscreen || trapName) {
+                const sel = buildSelector(el);
+                if (sel) out.push(sel);
+            }
+        }
+        return out;
+    }
+
+    function detectCsrf(container) {
+        const root = container || document;
+        const sels = [
+            'input[name="_token"]',
+            'input[name="csrf_token"]',
+            'input[name="csrfmiddlewaretoken"]',
+            'input[name="authenticity_token"]',
+            'input[name="__RequestVerificationToken"]',
+            'input[name*="csrf" i]',
+        ];
+        for (const s of sels) {
+            const el = root.querySelector(s);
+            if (el) {
+                return {
+                    selector: buildSelector(el) || s,
+                    value: el.value || '',
+                };
+            }
+        }
+        return null;
+    }
+
+    function detectSubmitStrategy(container, submitEl) {
+        if (container && container.tagName === 'FORM') {
+            if (submitEl) {
+                const tp = (submitEl.type||'').toLowerCase();
+                if (tp === 'submit') return 'requestSubmit';
+            }
+            return 'requestSubmit';
+        }
+        return 'click';
+    }
+
+    // ───── form structure scoring ────────────────────
+    function scoreForm(container, fields, checkboxes) {
         let score = 0;
         const hasPhone = fields.some(
             f => f.role === 'phone');
         const hasName = fields.some(
-            f => ['name','firstname','lastname']
-                .includes(f.role));
-        const visibleFields = fields.filter(
-            f => f.visible).length;
-        const radios = fields.filter(
-            f => f.role === 'radio').length;
+            f => ['name','firstname','lastname'].includes(f.role));
+        const hasEmail = fields.some(f => f.role === 'email');
+        const hasPassword = Array.from(container.querySelectorAll(
+            'input[type="password"]')).some(isVisible);
+        const visibleFields = fields.filter(f => f.visible).length;
+        const radios = fields.filter(f => f.role === 'radio').length;
 
         if (hasPhone) score += 30;
         if (hasPhone && hasName) score += 15;
-        if (visibleFields >= 2
-            && visibleFields <= 5)
-            score += 10;
+        if (visibleFields >= 2 && visibleFields <= 5) score += 10;
         if (radios > 4) score -= radios * 3;
 
-        const html = (container.innerHTML||'')
-            .toLowerCase();
-        if (/заказать звонок|перезвон|callback/
-            .test(html))
-            score += 20;
-        else if (/консультац/.test(html))
-            score += 12;
-        else if (/записаться|запись/.test(html))
-            score += 8;
-        if (/поиск|search|найти/.test(html))
+        // Reject login: password field
+        if (hasPassword) score -= 60;
+
+        // Reject newsletter: email only, no phone
+        if (hasEmail && !hasPhone && visibleFields <= 2)
             score -= 25;
-        if (/подписаться|subscribe/.test(html))
+
+        const html = (container.innerHTML||'').toLowerCase();
+
+        // Reject search forms by content
+        const searchBtn = Array.from(container.querySelectorAll(
+            'button, input[type="submit"]')).some(b => {
+                const t = ((b.innerText||b.value||'')+'').toLowerCase();
+                return /search|найти|поиск/i.test(t);
+            });
+        if (searchBtn && !hasPhone) score -= 50;
+
+        if (/заказать звонок|перезвон|callback/.test(html))
+            score += 20;
+        else if (/консультац/.test(html)) score += 12;
+        else if (/записаться|запись/.test(html)) score += 8;
+        if (/поиск|search|найти/.test(html)) score -= 25;
+        if (/подписаться|subscribe|newsletter/.test(html))
             score -= 20;
-        if (/отзыв|review/.test(html))
-            score -= 30;
+        if (/отзыв|review/.test(html)) score -= 30;
+        if (/логин|войти|sign.?in|log.?in/.test(html)
+            && hasPassword) score -= 40;
 
-        const textareas = container.querySelectorAll(
-            'textarea');
+        const textareas = container.querySelectorAll('textarea');
         for (const ta of textareas) {
-            const ph = (ta.placeholder||'')
-                .toLowerCase();
-            if (/отзыв|текст отзыва|review/.test(ph))
-                score -= 30;
+            const ph = (ta.placeholder||'').toLowerCase();
+            if (/отзыв|текст отзыва|review/.test(ph)) score -= 30;
         }
-
         const headings = container.querySelectorAll(
             'h1,h2,h3,h4,h5,h6');
         for (const hd of headings) {
-            const ht = (hd.innerText||'')
-                .toLowerCase();
-            if (/отзыв|отзывы|reviews/.test(ht))
-                score -= 25;
+            const ht = (hd.innerText||'').toLowerCase();
+            if (/отзыв|отзывы|reviews/.test(ht)) score -= 25;
         }
-
         return score;
     }
 
     function findSubmit(container) {
         for (const sel of [
-            'button[type="submit"]',
-            'input[type="submit"]',
+            'button[type="submit"]', 'input[type="submit"]',
         ]) {
             const el = container.querySelector(sel);
             if (el && isVisible(el))
-                return buildSelector(el);
+                return {selector: buildSelector(el), el};
         }
         const submitTexts = [
-            'отправить','записаться',
-            'оставить заявку','заказать звонок',
-            'получить консультацию',
-            'submit','send',
+            'отправить', 'записаться', 'оставить заявку',
+            'заказать звонок', 'получить консультацию',
+            'submit', 'send',
         ];
         for (const btn of container.querySelectorAll(
-            'button, input[type="button"]'
-        )) {
+            'button, input[type="button"]')) {
             if (!isVisible(btn)) continue;
             const t = (btn.innerText||btn.value||'')
                 .toLowerCase().trim();
             if (submitTexts.some(st => t.includes(st)))
-                return buildSelector(btn);
+                return {selector: buildSelector(btn), el: btn};
         }
         for (const btn of container.querySelectorAll(
-            'button:not([type])'
-        )) {
+            'button:not([type])')) {
             if (isVisible(btn))
-                return buildSelector(btn);
+                return {selector: buildSelector(btn), el: btn};
         }
+        return {selector: null, el: null};
+    }
+
+    // ───── rationalization ────────────────────────────
+    function rationalize(fields, container) {
+        // 1. Dedup roles (кроме radio/checkbox_other/text_unknown)
+        const seen = {};
+        const dedupRoles = new Set([
+            'phone', 'email', 'name', 'firstname', 'lastname',
+            'patronymic', 'comment', 'date',
+            'checkbox_consent',
+        ]);
+        for (const f of fields) {
+            if (!dedupRoles.has(f.role)) continue;
+            if (seen[f.role]) {
+                // Понижаем дубликат до alternative
+                if (f.alternatives && f.alternatives.length) {
+                    const next = f.alternatives.find(
+                        a => !seen[a[0]]
+                            && a[0] !== 'text_unknown');
+                    if (next) {
+                        f.role = next[0];
+                        f.confidence = next[1];
+                    } else {
+                        f.role = 'text_unknown';
+                        f.confidence = 0;
+                    }
+                } else {
+                    f.role = 'text_unknown';
+                    f.confidence = 0;
+                }
+            }
+            if (dedupRoles.has(f.role)) seen[f.role] = true;
+        }
+
+        // 2. Если есть firstname + lastname — generic name не нужен
+        const hasFL = (
+            fields.some(f => f.role === 'firstname')
+            && fields.some(f => f.role === 'lastname'));
+        if (hasFL) {
+            for (const f of fields) {
+                if (f.role === 'name') {
+                    f.role = 'text_unknown';
+                    f.confidence = 0;
+                }
+            }
+        }
+
+        // 3. Single text_unknown + phone → это name (default)
+        const hasPhone = fields.some(f => f.role === 'phone');
+        const hasAnyName = fields.some(
+            f => ['name','firstname','lastname'].includes(f.role));
+        if (hasPhone && !hasAnyName) {
+            const unknowns = fields.filter(
+                f => f.role === 'text_unknown' && f.visible);
+            if (unknowns.length === 1) {
+                unknowns[0].role = 'name';
+                unknowns[0].confidence = Math.max(
+                    0.5, unknowns[0].confidence);
+            } else if (unknowns.length > 1) {
+                // несколько — первый видимый берём как name
+                unknowns[0].role = 'name';
+                unknowns[0].confidence = Math.max(
+                    0.5, unknowns[0].confidence);
+            }
+        }
+
+        return fields;
+    }
+
+    function isRejectedForm(container, fields) {
+        // 1. Password field present → login
+        if (Array.from(container.querySelectorAll(
+            'input[type="password"]')).some(isVisible))
+            return 'has_password';
+
+        // 2. Only email, no phone, ≤2 fields → newsletter
+        const hasPhone = fields.some(f => f.role === 'phone');
+        const hasEmail = fields.some(f => f.role === 'email');
+        const visibleCount = fields.filter(f => f.visible).length;
+        if (hasEmail && !hasPhone && visibleCount <= 2)
+            return 'newsletter';
+
+        // 3. Search keyword + search button
+        const sigText = (
+            (container.getAttribute('action')||'') + ' '
+            + (container.getAttribute('role')||'') + ' '
+            + (container.className||'') + ' '
+            + (container.id||'')).toLowerCase();
+        if (/search/.test(sigText) && !hasPhone) {
+            const hasSearchBtn = Array.from(
+                container.querySelectorAll(
+                    'button, input[type="submit"]')).some(b => {
+                    const t = ((b.innerText||b.value||'')+'')
+                        .toLowerCase();
+                    return /search|найти|поиск/i.test(t);
+                });
+            if (hasSearchBtn) return 'search_form';
+        }
+
         return null;
     }
 
+    function isSearchForm(form) {
+        const act = (form.getAttribute('action')||'').toLowerCase();
+        const role = (form.getAttribute('role')||'').toLowerCase();
+        return act.includes('search') || role === 'search';
+    }
+
+    function showHidden(node) {
+        for (let i = 0; i < 12 && node; i++) {
+            try {
+                const st = getComputedStyle(node);
+                if (st.display === 'none')
+                    node.style.setProperty(
+                        'display','block','important');
+                if (st.visibility === 'hidden')
+                    node.style.setProperty(
+                        'visibility','visible','important');
+                if (parseFloat(st.opacity) < 0.1)
+                    node.style.setProperty(
+                        'opacity','1','important');
+            } catch(e) {}
+            node = node.parentElement;
+        }
+    }
+
+    // ───── main extractor per container ───────────────
     function extractContainer(container) {
         const fields = [];
+        const checkboxes = [];
         const allInputs = container.querySelectorAll(
             'input:not([type="hidden"])'
             + ':not([type="submit"])'
             + ':not([type="button"])'
             + ':not([type="reset"]),'
-            + 'textarea, select'
-        );
+            + 'textarea, select');
         for (const el of allInputs) {
             const type = (el.type||'').toLowerCase();
             const vis = isVisible(el)
-                || type==='checkbox'
-                || type==='radio';
-            if (!vis && type!=='checkbox'
-                && type!=='radio') continue;
-            const role = classifyField(el);
+                || type === 'checkbox' || type === 'radio';
+            if (!vis && type !== 'checkbox'
+                && type !== 'radio') continue;
+
+            const cls = classifyField(el);
             const selector = buildSelector(el);
             if (!selector) continue;
+
             const fld = {
                 tag: el.tagName.toLowerCase(),
                 type: type,
                 name: el.name || '',
                 id: el.id || '',
-                placeholder: (
-                    el.placeholder||''
-                ).trim(),
+                placeholder: (el.placeholder||'').trim(),
                 label: getLabel(el),
-                role: role,
+                role: cls.role,
+                confidence: cls.confidence,
+                alternatives: cls.alternatives,
                 visible: isVisible(el),
                 required: el.required
-                    || el.getAttribute(
-                        'aria-required'
-                    ) === 'true',
+                    || el.getAttribute('aria-required') === 'true',
                 selector: selector,
                 priority: vis ? 0 : 1,
+                validation: extractValidation(el),
+                mask: extractMask(el, cls.signals),
             };
             if (el.tagName === 'SELECT') {
-                fld.options = Array.from(
-                    el.options
-                ).slice(0, 8).map(
-                    o => ({
+                fld.options = Array.from(el.options).slice(0, 8)
+                    .map(o => ({
                         text: o.text.trim(),
                         value: o.value,
-                    })
-                );
-                fld.role = 'dropdown';
+                    }));
+            }
+
+            // checkboxes собираем и в fields (compat), и в отдельный массив
+            if (type === 'checkbox') {
+                checkboxes.push({
+                    selector: selector,
+                    role: cls.role === 'checkbox_consent'
+                        ? 'consent' : 'other',
+                    confidence: cls.confidence,
+                    required: fld.required,
+                    default_checked: !!el.checked,
+                    label: fld.label,
+                    name: fld.name,
+                });
             }
             fields.push(fld);
         }
+
+        // form_selector
         let formSelector = null;
         if (container.tagName === 'FORM') {
             if (container.id) {
@@ -328,23 +831,18 @@ FORM_EXTRACTOR_JS = r"""() => {
                     formSelector = 'form#'
                         + CSS.escape(container.id);
                 } catch(e) {
-                    formSelector = 'form#'
-                        + container.id;
+                    formSelector = 'form#' + container.id;
                 }
             } else if (container.action
-                && container.action
-                    !== window.location.href) {
+                && container.action !== window.location.href) {
                 formSelector = 'form[action="'
-                    + container.getAttribute('action')
-                    + '"]';
+                    + container.getAttribute('action') + '"]';
             } else {
-                const cls = (
-                    container.className||''
-                ).split(' ').filter(c => c)[0];
+                const cls = (container.className||'')
+                    .split(' ').filter(c => c)[0];
                 if (cls) {
                     try {
-                        formSelector = 'form.'
-                            + CSS.escape(cls);
+                        formSelector = 'form.' + CSS.escape(cls);
                     } catch(e) {
                         formSelector = 'form.' + cls;
                     }
@@ -353,103 +851,85 @@ FORM_EXTRACTOR_JS = r"""() => {
                 }
             }
         }
+
+        // submit + strategy
+        const sub = findSubmit(container);
+        const strategy = detectSubmitStrategy(container, sub.el);
+
+        // captcha + honeypots + csrf
+        const captcha = detectCaptcha(container);
+        const honeypots = detectHoneypots(container);
+        const csrf = detectCsrf(container);
+
         return {
             form_selector: formSelector,
-            submit_selector: findSubmit(container),
+            submit_selector: sub.selector,
+            submit_strategy: strategy,
             fields: fields,
-            score: scoreForm(container, fields),
+            checkboxes: checkboxes,
+            captcha_hint: captcha,
+            honeypots: honeypots,
+            csrf_token: csrf,
+            score: scoreForm(container, fields, checkboxes),
         };
     }
 
-    function resolveUnknowns(fields) {
-        let hasName = fields.some(
-            f => ['name','firstname','lastname']
-                .includes(f.role)
-        );
-        for (const f of fields) {
-            if (f.role !== 'text_unknown') continue;
-            if (!hasName && f.visible) {
-                f.role = 'name';
-                hasName = true;
-            }
+    function finalize(data, container, source) {
+        // Rationalization pass
+        data.fields = rationalize(data.fields, container);
+        const rejectReason = isRejectedForm(container, data.fields);
+        if (rejectReason) {
+            data._rejected = rejectReason;
+            return null;
         }
-        return fields;
-    }
-
-    function hasPhoneField(data) {
-        return data.fields.some(
-            f => f.role === 'phone'
-        );
-    }
-    function isSearchForm(form) {
-        const act = (form.getAttribute('action')
-            ||'').toLowerCase();
-        const role = (form.getAttribute('role')
-            ||'').toLowerCase();
-        return act.includes('search')
-            || role === 'search';
-    }
-    function showHidden(node) {
-        for (let i=0; i<12 && node; i++) {
-            try {
-                const st = getComputedStyle(node);
-                if (st.display === 'none')
-                    node.style.setProperty(
-                        'display','block','important'
-                    );
-                if (st.visibility === 'hidden')
-                    node.style.setProperty(
-                        'visibility','visible',
-                        'important'
-                    );
-                if (parseFloat(st.opacity) < 0.1)
-                    node.style.setProperty(
-                        'opacity','1','important'
-                    );
-            } catch(e) {}
-            node = node.parentElement;
-        }
-    }
-
-    // Стратегия 1: видимые формы с телефоном
-    let visibleCandidates = [];
-    for (const form of
-        document.querySelectorAll('form')) {
-        if (!isVisible(form)) continue;
-        if (isSearchForm(form)) continue;
-        const data = extractContainer(form);
-        if (!data.fields.length) continue;
-        if (!hasPhoneField(data)) continue;
-        data.fields = resolveUnknowns(data.fields);
-        data.source = 'form';
-        data._visibleCount = data.fields
-            .filter(f => f.visible).length;
-        visibleCandidates.push(data);
-    }
-    if (visibleCandidates.length) {
-        visibleCandidates.sort(
-            (a, b) => a._visibleCount
-                - b._visibleCount
-        );
-        return visibleCandidates[0];
-    }
-
-    // Стратегия 2: скрытые формы
-    for (const form of
-        document.querySelectorAll('form')) {
-        if (isSearchForm(form)) continue;
-        const data = extractContainer(form);
-        if (!data.fields.length) continue;
-        if (!hasPhoneField(data)) continue;
-        showHidden(form);
-        data.fields = resolveUnknowns(data.fields);
-        data.source = 'hidden_form';
+        data.source = source;
         return data;
     }
 
-    // Стратегия 3: модалки и div-контейнеры
+    function hasPhoneField(data) {
+        return data && data.fields.some(
+            f => f.role === 'phone');
+    }
+
+    // ───── DISCOVERY STRATEGIES ──────────────────────
+
+    // Strategy 1: visible <form> with phone
+    let visibleCandidates = [];
+    for (const form of document.querySelectorAll('form')) {
+        if (!isVisible(form)) continue;
+        if (isSearchForm(form)) continue;
+        const raw = extractContainer(form);
+        if (!raw.fields.length) continue;
+        if (!hasPhoneField(raw)) continue;
+        const data = finalize(raw, form, 'form');
+        if (!data) continue;
+        data._visibleCount = data.fields.filter(
+            f => f.visible).length;
+        visibleCandidates.push(data);
+    }
+    if (visibleCandidates.length) {
+        // Берём с highest score; при равенстве — наименьший по полям
+        visibleCandidates.sort((a, b) => {
+            if (b.score !== a.score) return b.score - a.score;
+            return a._visibleCount - b._visibleCount;
+        });
+        return visibleCandidates[0];
+    }
+
+    // Strategy 2: hidden <form>
+    for (const form of document.querySelectorAll('form')) {
+        if (isSearchForm(form)) continue;
+        const raw = extractContainer(form);
+        if (!raw.fields.length) continue;
+        if (!hasPhoneField(raw)) continue;
+        showHidden(form);
+        const data = finalize(raw, form, 'hidden_form');
+        if (data) return data;
+    }
+
+    // Strategy 3: modal / container divs
     const modalSels = [
-        '[role="dialog"]','[aria-modal="true"]',
+        '[role="dialog"]', '[aria-modal="true"]',
         '[class*="modal" i]:not(nav)',
         '[class*="popup" i]:not(nav)',
         '[class*="t-popup" i]',
@@ -459,27 +939,21 @@ FORM_EXTRACTOR_JS = r"""() => {
         '[class*="feedback" i]',
     ];
     for (const sel of modalSels) {
-        for (const div of
-            document.querySelectorAll(sel)) {
+        for (const div of document.querySelectorAll(sel)) {
             if (div.tagName === 'FORM') continue;
             const inputs = div.querySelectorAll(
-                'input:not([type="hidden"]),'
-                + 'textarea, select'
-            );
+                'input:not([type="hidden"]),textarea, select');
             if (inputs.length < 1) continue;
-            const data = extractContainer(div);
-            if (!data.fields.length) continue;
-            if (!hasPhoneField(data)) continue;
+            const raw = extractContainer(div);
+            if (!raw.fields.length) continue;
+            if (!hasPhoneField(raw)) continue;
             showHidden(div);
-            data.fields = resolveUnknowns(
-                data.fields
-            );
-            data.source = 'container';
-            return data;
+            const data = finalize(raw, div, 'container');
+            if (data) return data;
         }
     }
 
-    // Стратегия 3.5: shadow DOM
+    // Strategy 3.5: shadow DOM
     try {
         const allEls = document.querySelectorAll('*');
         for (const host of allEls) {
@@ -487,39 +961,32 @@ FORM_EXTRACTOR_JS = r"""() => {
             const sr = host.shadowRoot;
             const forms = sr.querySelectorAll('form');
             for (const form of forms) {
-                const data = extractContainer(form);
-                if (!data.fields.length) continue;
-                if (!hasPhoneField(data)) continue;
-                data.fields = resolveUnknowns(
-                    data.fields);
-                data.source = 'shadow_dom';
-                return data;
+                const raw = extractContainer(form);
+                if (!raw.fields.length) continue;
+                if (!hasPhoneField(raw)) continue;
+                const data = finalize(raw, form, 'shadow_dom');
+                if (data) return data;
             }
             const phoneSelsSD = [
                 'input[type="tel"]',
                 'input[name*="phone" i]',
             ].join(',');
-            const phoneSD = sr.querySelector(
-                phoneSelsSD);
+            const phoneSD = sr.querySelector(phoneSelsSD);
             if (phoneSD) {
-                const container = phoneSD.closest(
-                    'form') || phoneSD.closest(
-                    '[class*="form" i]')
+                const container = phoneSD.closest('form')
+                    || phoneSD.closest('[class*="form" i]')
                     || host;
-                const data = extractContainer(
-                    container);
-                if (data.fields.length
-                    && hasPhoneField(data)) {
-                    data.fields = resolveUnknowns(
-                        data.fields);
-                    data.source = 'shadow_dom';
-                    return data;
+                const raw = extractContainer(container);
+                if (raw.fields.length && hasPhoneField(raw)) {
+                    const data = finalize(
+                        raw, container, 'shadow_dom');
+                    if (data) return data;
                 }
             }
         }
     } catch(e) {}
 
-    // Стратегия 4: от поля телефона вверх
+    // Strategy 4: phone-ancestor traversal
     const phoneSels = [
         'input[type="tel"]',
         'input.t-input-phonemask',
@@ -536,18 +1003,15 @@ FORM_EXTRACTOR_JS = r"""() => {
             || phoneEl.closest('[class*="form" i]');
         if (!container) {
             container = phoneEl;
-            for (let i=0;
-                i<5 && container.parentElement; i++)
+            for (let i = 0; i < 5 && container.parentElement; i++)
                 container = container.parentElement;
         }
         if (container) {
-            const data = extractContainer(container);
-            if (data.fields.length) {
-                data.fields = resolveUnknowns(
-                    data.fields
-                );
-                data.source = 'phone_ancestor';
-                return data;
+            const raw = extractContainer(container);
+            if (raw.fields.length) {
+                const data = finalize(
+                    raw, container, 'phone_ancestor');
+                if (data) return data;
             }
         }
     }
@@ -558,9 +1022,7 @@ FORM_EXTRACTOR_JS = r"""() => {
 
 async def extract_form_json(page) -> Optional[dict]:
     try:
-        result = await page.evaluate(
-            FORM_EXTRACTOR_JS
-        )
+        result = await page.evaluate(FORM_EXTRACTOR_JS)
         if result and result.get("fields"):
             return result
         if log := get_logger():
@@ -571,7 +1033,5 @@ async def extract_form_json(page) -> Optional[dict]:
             )
     except Exception as e:
         if log := get_logger():
-            log.err(
-                "js_extractor", msg=str(e)[:200]
-            )
+            log.err("js_extractor", msg=str(e)[:200])
     return None

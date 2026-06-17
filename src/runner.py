@@ -1,6 +1,7 @@
 import asyncio
 import json
-import re as _re
+import shutil
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -22,6 +23,9 @@ from db import (
     db_get_queue, db_get_queue_clients,
     db_update_queue_status, db_update_queue_progress,
     db_update_client_status,
+    db_get_form_profile, db_save_form_profile,
+    db_increment_profile_fail,
+    db_delete_form_profile,
 )
 from ai_provider import ask_ai_sync, collect_full_html
 from form_finder import extract_forms, build_smart_plan
@@ -43,9 +47,194 @@ _pw = None
 _browser_lock = asyncio.Lock()
 _active_queue_id: str | None = None
 _queue_cancel = asyncio.Event()
+_active_tasks: set = set()
+_active_contexts: set = set()
+_active_queue_task = None
 LOG_DIR = Path("data/logs")
+LOG_RETENTION_DAYS = 3
+
+
+def _cleanup_data_except_db():
+    data_dir = Path("data")
+    if not data_dir.exists():
+        return
+    for item in data_dir.iterdir():
+        try:
+            if item.is_file() and item.suffix == ".db":
+                continue
+            if item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+            else:
+                item.unlink()
+        except Exception:
+            pass
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+async def _logs_ttl_loop():
+    while True:
+        try:
+            await asyncio.sleep(3600)
+            cutoff = time.time() - LOG_RETENTION_DAYS * 86400
+            if not LOG_DIR.exists():
+                continue
+            for sid_dir in LOG_DIR.iterdir():
+                try:
+                    if not sid_dir.is_dir():
+                        continue
+                    if sid_dir.stat().st_mtime < cutoff:
+                        shutil.rmtree(
+                            sid_dir, ignore_errors=True,
+                        )
+                except Exception:
+                    continue
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+
+async def force_stop_all():
+    _queue_cancel.set()
+
+    for t in list(_active_tasks):
+        try:
+            t.cancel()
+        except Exception:
+            pass
+
+    global _active_queue_task
+    if _active_queue_task and not _active_queue_task.done():
+        try:
+            _active_queue_task.cancel()
+        except Exception:
+            pass
+
+    for ctx in list(_active_contexts):
+        try:
+            await ctx.close()
+        except Exception:
+            pass
+    _active_contexts.clear()
 
 _MSK = timezone(timedelta(hours=MSK_UTC_OFFSET))
+
+PROFILE_TTL_DAYS = 90
+PROFILE_FAIL_THRESHOLD = 2
+
+
+def _detect_signal_from_match(match: str) -> str:
+    m = (match or "")[:15].upper()
+    if m.startswith("NET"):
+        return "net"
+    if m.startswith("XHR"):
+        return "xhr"
+    if "WPCF7" in m:
+        return "dom_wpcf7"
+    if "TILDA" in m:
+        return "dom_tilda"
+    return "dom"
+
+
+def _is_profile_usable(profile: dict) -> bool:
+    if not profile:
+        return False
+    if (
+        profile.get("fail_count", 0)
+        >= PROFILE_FAIL_THRESHOLD
+    ):
+        return False
+    last_ok = profile.get("last_success_at")
+    if not last_ok:
+        return False
+    try:
+        dt = datetime.strptime(
+            last_ok, "%Y-%m-%d %H:%M:%S",
+        )
+    except Exception:
+        return False
+    age_days = (datetime.now() - dt).days
+    if age_days > PROFILE_TTL_DAYS:
+        return False
+    actions = profile.get("actions_json") or "[]"
+    try:
+        if not json.loads(actions):
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def _profile_to_instructions(profile: dict) -> dict:
+    try:
+        actions = json.loads(
+            profile.get("actions_json") or "[]",
+        )
+    except Exception:
+        actions = []
+    return {
+        "form_found": True,
+        "form_selector": (
+            profile.get("form_selector") or None
+        ),
+        "actions": actions,
+        "has_captcha": bool(
+            profile.get("has_captcha", 0),
+        ),
+        "captcha_type": (
+            profile.get("captcha_type") or None
+        ),
+        "notes": "Из кеша профиля формы",
+    }
+
+
+async def _maybe_save_profile(
+    domain: str, result: dict, instructions: dict,
+):
+    """Сохраняет профиль формы если submit удался."""
+    if result.get("status") != "success":
+        return
+    if not instructions or not instructions.get(
+        "actions",
+    ):
+        return
+    method = result.get("method", "")
+    if not method.startswith("form_"):
+        return
+    submit_sel = ""
+    for a in instructions.get("actions") or []:
+        if a.get("action") == "submit":
+            submit_sel = a.get("selector", "")
+            break
+    log = _site_logger_var.get(None)
+    try:
+        await db_save_form_profile(
+            domain=domain,
+            form_selector=(
+                instructions.get("form_selector") or ""
+            ),
+            submit_selector=submit_sel,
+            actions=instructions.get("actions") or [],
+            has_captcha=bool(
+                instructions.get("has_captcha", False),
+            ),
+            captcha_type=(
+                instructions.get("captcha_type") or ""
+            ),
+            success_method=method,
+            success_signal=_detect_signal_from_match(
+                result.get("message", ""),
+            ),
+            success_match=result.get("message", ""),
+        )
+        if log:
+            log.ok(f"profile_cache: сохранён для {domain}")
+    except Exception as e:
+        if log:
+            log.warn(
+                f"profile_cache save error: "
+                f"{str(e)[:100]}",
+            )
 
 
 def _is_working_hours() -> bool:
@@ -96,7 +285,13 @@ async def _wait_for_working_hours(queue_id: str):
     while not _is_working_hours():
         if _queue_cancel.is_set():
             return
-        await asyncio.sleep(30)
+        try:
+            await asyncio.wait_for(
+                _queue_cancel.wait(), timeout=30,
+            )
+            return
+        except asyncio.TimeoutError:
+            pass
     await db_update_queue_status(queue_id, "running")
     await _ws_broadcast({
         "type": "resumed",
@@ -216,6 +411,8 @@ async def _try_fill_and_submit(
             "form_selector"
         ),
         step_dir=step_dir,
+        honeypots=instructions.get("honeypots"),
+        csrf_token=instructions.get("csrf_token"),
     )
 
     form_el = fill_result["form_el"]
@@ -223,6 +420,7 @@ async def _try_fill_and_submit(
         ctx, phone,
         firstname, lastname, patronymic,
         email, comment, form_el,
+        honeypots=fill_result.get("honeypots"),
     )
 
     if not fill_result["phone_ok"]:
@@ -243,6 +441,7 @@ async def _try_fill_and_submit(
         captcha_type_hint=instructions.get(
             "captcha_type"
         ),
+        captcha_hint=instructions.get("captcha_hint"),
     )
     if captcha_result == "no_key":
         return {
@@ -335,11 +534,16 @@ async def check_site_v2(
     max_retries: int = 6,
     prev_hint: dict = None,
     proxy: dict = None,
+    session_id: str = "",
 ):
     domain = domain_from_url(url)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    _logger = SiteLogger(domain, url, LOG_DIR)
+    sid_log_dir = (
+        LOG_DIR / session_id if session_id else LOG_DIR
+    )
+    sid_log_dir.mkdir(parents=True, exist_ok=True)
+    _logger = SiteLogger(domain, url, sid_log_dir)
     _log_token = _site_logger_var.set(_logger)
+    ctx = None
 
     result = {
         "url": url, "status": "failed",
@@ -370,6 +574,7 @@ async def check_site_v2(
                 ctx = await browser.new_context(
                     **ctx_kwargs,
                 )
+                _active_contexts.add(ctx)
                 page = await ctx.new_page()
                 break
             except Exception:
@@ -479,72 +684,155 @@ async def check_site_v2(
                 page, "01_loaded", step_dir
             )
 
-            # ── 2. Поиск формы ─────────────────
-            _logger.step("extract", "ищем форму")
-            form_json, form_ctx = (
-                await extract_forms(page)
-            )
-            has_ct = await has_calltouch(page)
-            keep_ct = not form_json and has_ct
-            await suppress_widgets(
-                page, keep_calltouch=keep_ct,
-            )
-            await step_shot(
-                page, "02_form_found", step_dir
-            )
-
-            # ── 3. Строим план ─────────────────
             instructions = None
+            instructions_used = None
             tokens = 0
-            iframe_ctx = (
-                form_ctx.frame
-                if form_ctx and form_ctx.frame
-                else None
-            )
+            cache_tried = False
 
-            if form_json:
-                _logger.step(
-                    "smart_plan",
-                    "строим эвристику",
+            # ── 1.5. Кеш профиля формы ─────────
+            if attempt_no == 1:
+                cached = await db_get_form_profile(
+                    domain,
                 )
-                instructions = build_smart_plan(
-                    form_json
-                )
-                if (
-                    instructions
-                    and instructions.get("actions")
-                ):
-                    # ── 4. Заполняем + submit ──
-                    sub, fill_res = (
+                if cached and _is_profile_usable(cached):
+                    cache_tried = True
+                    _logger.step(
+                        "profile_cache",
+                        f"hit (success={cached.get('success_count')} "
+                        f"fail={cached.get('fail_count')})",
+                    )
+                    cached_instr = (
+                        _profile_to_instructions(cached)
+                    )
+                    sub_c, _fill_c = (
                         await _try_fill_and_submit(
-                            page, instructions, phone,
+                            page, cached_instr, phone,
                             firstname, lastname,
                             patronymic,
                             email, comment,
                             rucaptcha_key, url,
-                            step_dir, "smart",
-                            context=iframe_ctx,
+                            step_dir, "cached",
                         )
                     )
-                    if sub:
-                        result.update(sub)
-                        if result["status"] in (
-                            "success", "captcha",
-                        ):
-                            _logger.finish(result)
-                            _site_logger_var.reset(
-                                _log_token
+                    if (
+                        sub_c
+                        and sub_c.get("status")
+                        == "success"
+                    ):
+                        result.update(sub_c)
+                        instructions = cached_instr
+                        instructions_used = cached_instr
+                        _logger.ok(
+                            "profile_cache: применён успешно",
+                        )
+                        # запись профиля — единым хвостом
+                    else:
+                        new_fc = (
+                            await db_increment_profile_fail(
+                                domain,
                             )
-                            return result
-                    elif fill_res:
-                        result.update({
-                            "status": "uncertain",
-                            "method": "form_smart",
-                            "message": (
-                                "DOM не изменился "
-                                "после заполнения"
-                            ),
-                        })
+                        )
+                        _logger.warn(
+                            f"profile_cache: не сработал "
+                            f"(fail_count={new_fc})",
+                        )
+                        if (
+                            new_fc
+                            >= PROFILE_FAIL_THRESHOLD
+                        ):
+                            await db_delete_form_profile(
+                                domain,
+                            )
+                            _logger.warn(
+                                "profile_cache: удалён "
+                                "(превышен порог фейлов)",
+                            )
+                elif cached:
+                    _logger.step(
+                        "profile_cache",
+                        f"stale (fail={cached.get('fail_count')} "
+                        f"last={cached.get('last_success_at')})",
+                    )
+
+            # ── 2. Поиск формы ─────────────────
+            if result["status"] != "success":
+                _logger.step("extract", "ищем форму")
+                form_json, form_ctx = (
+                    await extract_forms(page)
+                )
+                has_ct = await has_calltouch(page)
+                keep_ct = not form_json and has_ct
+                await suppress_widgets(
+                    page, keep_calltouch=keep_ct,
+                )
+                await step_shot(
+                    page, "02_form_found", step_dir
+                )
+
+                # ── 3. Строим план ─────────────────
+                iframe_ctx = (
+                    form_ctx.frame
+                    if form_ctx and form_ctx.frame
+                    else None
+                )
+
+                if form_json:
+                    _logger.step(
+                        "smart_plan",
+                        "строим эвристику",
+                    )
+                    instructions = build_smart_plan(
+                        form_json
+                    )
+                    if (
+                        instructions
+                        and instructions.get("actions")
+                    ):
+                        # ── 4. Заполняем + submit ──
+                        sub, fill_res = (
+                            await _try_fill_and_submit(
+                                page, instructions, phone,
+                                firstname, lastname,
+                                patronymic,
+                                email, comment,
+                                rucaptcha_key, url,
+                                step_dir, "smart",
+                                context=iframe_ctx,
+                            )
+                        )
+                        if sub:
+                            result.update(sub)
+                            if (
+                                result["status"]
+                                == "success"
+                            ):
+                                instructions_used = (
+                                    instructions
+                                )
+                            if result["status"] in (
+                                "success", "captcha",
+                            ):
+                                await _maybe_save_profile(
+                                    domain, result,
+                                    instructions_used,
+                                )
+                                _logger.finish(result)
+                                _site_logger_var.reset(
+                                    _log_token
+                                )
+                                return result
+                        elif fill_res:
+                            result.update({
+                                "status": "uncertain",
+                                "method": "form_smart",
+                                "message": (
+                                    "DOM не изменился "
+                                    "после заполнения"
+                                ),
+                            })
+            else:
+                form_json = None
+                iframe_ctx = None
 
             # ── 5. AI fallback ─────────────────
             if (
@@ -573,8 +861,25 @@ async def check_site_v2(
                             "claude",
                         )
                     except Exception as e:
+                        raw_text = getattr(
+                            e, "raw_text", "",
+                        )
+                        err_tokens = getattr(
+                            e, "tokens", 0,
+                        )
+                        tokens += err_tokens
+                        if raw_text:
+                            try:
+                                (_logger.site_dir
+                                 / "ai_raw.txt").write_text(
+                                    raw_text,
+                                    encoding="utf-8",
+                                )
+                            except Exception:
+                                pass
                         _logger.log_ai(
-                            "", {}, 0, "",
+                            "", {}, err_tokens,
+                            "claude",
                             error=str(e)[:200],
                         )
                         ai_plan = None
@@ -597,6 +902,12 @@ async def check_site_v2(
                     )
                     if sub2:
                         result.update(sub2)
+                        if (
+                            result["status"]
+                            == "success"
+                        ):
+                            instructions = ai_plan
+                            instructions_used = ai_plan
                     else:
                         result.update({
                             "status": "uncertain",
@@ -752,11 +1063,22 @@ async def check_site_v2(
             result["ai_instructions"] = instructions
 
         finally:
-            try:
-                await ctx.close()
-            except Exception:
-                pass
+            if ctx is not None:
+                _active_contexts.discard(ctx)
+                try:
+                    await ctx.close()
+                except Exception:
+                    pass
 
+    except asyncio.CancelledError:
+        result["status"] = "cancelled"
+        result["method"] = "cancelled"
+        result["message"] = "Остановлено пользователем"
+        result["reason_code"] = "cancelled"
+        _logger.warn("отмена: stop по запросу")
+        _logger.finish(result)
+        _site_logger_var.reset(_log_token)
+        raise
     except Exception as e:
         result["message"] = (
             f"Критическая ошибка: "
@@ -769,6 +1091,12 @@ async def check_site_v2(
         result.get("reason_code")
         or _classify_reason(result)
     )
+    try:
+        await _maybe_save_profile(
+            domain, result, instructions_used,
+        )
+    except Exception:
+        pass
     _logger.finish(result)
     _site_logger_var.reset(_log_token)
     return result
@@ -782,83 +1110,114 @@ async def _process_one(
     proxy: dict = None,
     queue_id: str = None,
 ):
-    async with sem:
-        if queue_id:
-            await _wait_for_working_hours(queue_id)
-            if _queue_cancel.is_set():
+    current = asyncio.current_task()
+    if current is not None:
+        _active_tasks.add(current)
+    try:
+        async with sem:
+            if queue_id:
+                await _wait_for_working_hours(queue_id)
+                if _queue_cancel.is_set():
+                    return None
+
+            prev_hint = None
+            result = None
+            for attempt in range(1, max_retries + 1):
+                if _queue_cancel.is_set():
+                    return None
+                await _ws_broadcast({
+                    "type": "attempt",
+                    "url": url,
+                    "attempt_no": attempt,
+                    "max_attempts": max_retries,
+                    "retrying": attempt > 1,
+                })
+                result = await check_site_v2(
+                    url, phone,
+                    firstname, lastname, patronymic,
+                    email, comment,
+                    claude_key, rucaptcha_key,
+                    attempt_no=attempt,
+                    max_retries=max_retries,
+                    prev_hint=prev_hint,
+                    proxy=proxy,
+                    session_id=session_id,
+                )
+                await db_add_result(
+                    session_id, url, result,
+                )
+                await _ws_broadcast({
+                    "type": "attempt_result",
+                    "url": url,
+                    "attempt_no": attempt,
+                    "max_attempts": max_retries,
+                    "status": result["status"],
+                    "reason_code": result.get(
+                        "reason_code", ""
+                    ),
+                })
+                if result["status"] in (
+                    "success", "captcha",
+                ):
+                    break
+                prev_hint = {
+                    "reason_code": result.get(
+                        "reason_code", ""
+                    ),
+                    "status": result["status"],
+                    "message": result.get(
+                        "message", ""
+                    ),
+                }
+                if attempt < max_retries:
+                    try:
+                        await asyncio.wait_for(
+                            _queue_cancel.wait(),
+                            timeout=2,
+                        )
+                        return None
+                    except asyncio.TimeoutError:
+                        pass
+
+            if result is None:
                 return None
 
-        prev_hint = None
-        for attempt in range(1, max_retries + 1):
-            await _ws_broadcast({
-                "type": "attempt",
+            msg = {
+                "type": "result",
                 "url": url,
-                "attempt_no": attempt,
-                "max_attempts": max_retries,
-                "retrying": attempt > 1,
-            })
-            result = await check_site_v2(
-                url, phone,
-                firstname, lastname, patronymic,
-                email, comment,
-                claude_key, rucaptcha_key,
-                attempt_no=attempt,
-                max_retries=max_retries,
-                prev_hint=prev_hint,
-                proxy=proxy,
-            )
-            await db_add_result(
-                session_id, url, result,
-            )
-            await _ws_broadcast({
-                "type": "attempt_result",
-                "url": url,
-                "attempt_no": attempt,
-                "max_attempts": max_retries,
                 "status": result["status"],
+                "method": result["method"],
+                "message": result.get("message", ""),
+                "tokens_used": result.get(
+                    "tokens_used", 0
+                ),
+                "ai_notes": (
+                    (result.get("ai_instructions")
+                     or {}).get("notes", "")
+                ),
                 "reason_code": result.get(
                     "reason_code", ""
                 ),
-            })
-            if result["status"] in (
-                "success", "captcha",
-            ):
-                break
-            prev_hint = {
-                "reason_code": result.get(
-                    "reason_code", ""
+                "attempt_no": result.get(
+                    "attempt_no", 1
                 ),
-                "status": result["status"],
-                "message": result.get(
-                    "message", ""
-                ),
+                "max_attempts": max_retries,
             }
-            if attempt < max_retries:
-                await asyncio.sleep(2)
-
-        msg = {
-            "type": "result",
+            await _ws_broadcast(msg)
+            return result
+    except asyncio.CancelledError:
+        await _ws_broadcast({
+            "type": "attempt_result",
             "url": url,
-            "status": result["status"],
-            "method": result["method"],
-            "message": result.get("message", ""),
-            "tokens_used": result.get(
-                "tokens_used", 0
-            ),
-            "ai_notes": (
-                (result.get("ai_instructions")
-                 or {}).get("notes", "")
-            ),
-            "reason_code": result.get(
-                "reason_code", ""
-            ),
-            "attempt_no": result.get(
-                "attempt_no", 1
-            ),
+            "attempt_no": 0,
             "max_attempts": max_retries,
-        }
-        await _ws_broadcast(msg)
-        return result
+            "status": "cancelled",
+            "reason_code": "cancelled",
+        })
+        return None
+    finally:
+        if current is not None:
+            _active_tasks.discard(current)
 
 
 async def _run_session_bg(
@@ -885,12 +1244,16 @@ async def _run_session_bg(
         )
         for u in urls if u.strip()
     ]
-    await asyncio.gather(*tasks)
-    await db_finish_session(sid)
-    await _ws_broadcast({
-        "type": "done",
-        "session_id": sid,
-    })
+    try:
+        await asyncio.gather(
+            *tasks, return_exceptions=True,
+        )
+    finally:
+        await db_finish_session(sid)
+        await _ws_broadcast({
+            "type": "done",
+            "session_id": sid,
+        })
 
 
 async def run_session(
@@ -903,10 +1266,12 @@ async def run_session(
     session_name: str = "",
     max_attempts: int = 3,
 ):
+    _cleanup_data_except_db()
     sid = str(uuid.uuid4())[:8]
     await db_create_session(
         sid, session_name or sid, len(urls),
     )
+    _queue_cancel.clear()
     asyncio.create_task(
         _run_session_bg(
             sid, urls, phone,
@@ -977,75 +1342,96 @@ async def _run_client(
         )
         for u in urls if u.strip()
     ]
-    await asyncio.gather(*tasks)
+    try:
+        await asyncio.gather(
+            *tasks, return_exceptions=True,
+        )
+    finally:
+        await db_finish_session(sid)
+        final_status = (
+            "cancelled" if _queue_cancel.is_set()
+            else "done"
+        )
+        await db_update_client_status(
+            client_id, final_status,
+        )
 
-    await db_finish_session(sid)
-    await db_update_client_status(client_id, "done")
-
-    await _ws_broadcast({
-        "type": "client_done",
-        "queue_id": queue_id,
-        "client_id": client_id,
-        "session_id": sid,
-        "client_position": client["position"],
-    })
+        await _ws_broadcast({
+            "type": "client_done",
+            "queue_id": queue_id,
+            "client_id": client_id,
+            "session_id": sid,
+            "client_position": client["position"],
+            "status": final_status,
+        })
     return sid
 
 
 async def _run_queue_bg(queue_id: str):
-    global _active_queue_id
+    global _active_queue_id, _active_queue_task
     _active_queue_id = queue_id
     _queue_cancel.clear()
 
-    queue = await db_get_queue(queue_id)
-    clients = await db_get_queue_clients(queue_id)
-    urls = json.loads(queue["urls"])
+    final = "done"
+    try:
+        queue = await db_get_queue(queue_id)
+        clients = await db_get_queue_clients(queue_id)
+        urls = json.loads(queue["urls"])
 
-    await db_update_queue_status(queue_id, "running")
-    await _ws_broadcast({
-        "type": "queue_start",
-        "queue_id": queue_id,
-        "total_clients": len(clients),
-        "total_urls": len(urls),
-    })
+        await db_update_queue_status(queue_id, "running")
+        await _ws_broadcast({
+            "type": "queue_start",
+            "queue_id": queue_id,
+            "total_clients": len(clients),
+            "total_urls": len(urls),
+        })
 
-    start_idx = queue.get("current_client_idx", 0)
+        start_idx = queue.get("current_client_idx", 0)
 
-    for i, client in enumerate(
-        clients[start_idx:], start=start_idx,
-    ):
+        for i, client in enumerate(
+            clients[start_idx:], start=start_idx,
+        ):
+            if _queue_cancel.is_set():
+                break
+
+            await _wait_for_working_hours(queue_id)
+            if _queue_cancel.is_set():
+                break
+
+            await db_update_queue_progress(
+                queue_id, i, i,
+            )
+
+            try:
+                await _run_client(
+                    queue_id, client, urls,
+                    queue["claude_key"],
+                    queue["rucaptcha_key"],
+                    queue["max_attempts"],
+                )
+            except asyncio.CancelledError:
+                break
+
+            await db_update_queue_progress(
+                queue_id, i + 1, i + 1,
+            )
+
         if _queue_cancel.is_set():
-            break
+            final = "cancelled"
+    except asyncio.CancelledError:
+        final = "cancelled"
+    finally:
+        await db_update_queue_status(queue_id, final)
+        _active_queue_id = None
+        _active_queue_task = None
+        _active_tasks.clear()
+        _active_contexts.clear()
 
-        await _wait_for_working_hours(queue_id)
-        if _queue_cancel.is_set():
-            break
-
-        await db_update_queue_progress(queue_id, i, i)
-
-        await _run_client(
-            queue_id, client, urls,
-            queue["claude_key"],
-            queue["rucaptcha_key"],
-            queue["max_attempts"],
-        )
-
-        await db_update_queue_progress(
-            queue_id, i + 1, i + 1,
-        )
-
-    final = (
-        "cancelled" if _queue_cancel.is_set()
-        else "done"
-    )
-    await db_update_queue_status(queue_id, final)
-    _active_queue_id = None
-
-    await _ws_broadcast({
-        "type": "queue_done",
-        "queue_id": queue_id,
-        "status": final,
-    })
+        await _ws_broadcast({
+            "type": "queue_done",
+            "queue_id": queue_id,
+            "status": final,
+        })
 
 
 async def run_queue(
@@ -1056,8 +1442,11 @@ async def run_queue(
     max_attempts: int = 3,
 ) -> str:
     global _active_queue_id
+    global _active_queue_task
     if _active_queue_id:
         raise ValueError("Очередь уже запущена")
+
+    _cleanup_data_except_db()
 
     qid = str(uuid.uuid4())[:8]
 
@@ -1078,5 +1467,8 @@ async def run_queue(
             c.get("proxy", ""),
         )
 
-    asyncio.create_task(_run_queue_bg(qid))
+    _queue_cancel.clear()
+    _active_queue_task = asyncio.create_task(
+        _run_queue_bg(qid)
+    )
     return qid

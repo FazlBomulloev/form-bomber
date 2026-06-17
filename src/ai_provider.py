@@ -192,12 +192,48 @@ def _expand_ai_response(short: dict) -> dict:
     }
 
 
+class AIParseError(ValueError):
+    """JSON-ответ Claude не распарсился. raw_text — что
+    реально вернул провайдер (для разборов)."""
+
+    def __init__(self, message: str, raw_text: str = ""):
+        super().__init__(message)
+        self.raw_text = raw_text or ""
+
+
 def _parse(content):
-    content = re.sub(
-        r'^```(?:json)?\s*', '', content.strip(),
-    )
-    content = re.sub(r'\s*```\s*$', '', content)
-    raw = json.loads(content)
+    """Достаёт первый JSON-объект из ответа Claude.
+    Терпит markdown-обёртку, лишний текст до/после
+    JSON, SSE-префиксы прокси."""
+    if not content or not content.strip():
+        raise AIParseError(
+            "пустой ответ Claude",
+            raw_text=content or "",
+        )
+    s = content.strip()
+    s = re.sub(r'^```(?:json)?\s*', '', s)
+    s = re.sub(r'\s*```\s*$', '', s).strip()
+    start = s.find('{')
+    if start < 0:
+        raise AIParseError(
+            f"JSON не найден; head={s[:120]!r}",
+            raw_text=content,
+        )
+    try:
+        raw, _end = json.JSONDecoder().raw_decode(
+            s[start:],
+        )
+    except json.JSONDecodeError as e:
+        raise AIParseError(
+            f"raw_decode: {e}; "
+            f"head={s[start:start + 200]!r}",
+            raw_text=content,
+        )
+    if not isinstance(raw, dict):
+        raise AIParseError(
+            f"ожидался объект, получен {type(raw).__name__}",
+            raw_text=content,
+        )
     if 'a' in raw and 'actions' not in raw:
         return _expand_ai_response(raw)
     return raw
@@ -244,7 +280,8 @@ def _claude_call(prompt, system, api_key):
 
 def ask_ai_sync(page_html, url, claude_key):
     """Принимает сырой HTML, чистит, отправляет в Claude.
-    Возвращает (result_dict, tokens, provider)."""
+    Возвращает (result_dict, tokens, provider).
+    При ошибке парсинга кидает AIParseError с raw_text."""
     cleaned = clean_html(page_html)
     prompt = _PROMPT.replace("%%HTML%%", cleaned)
 
@@ -264,7 +301,12 @@ def ask_ai_sync(page_html, url, claude_key):
         usage.get("input_tokens", 0)
         + usage.get("output_tokens", 0)
     )
-    return _parse(content), tokens, "claude"
+    try:
+        parsed = _parse(content)
+    except AIParseError as e:
+        e.tokens = tokens
+        raise
+    return parsed, tokens, "claude"
 
 
 async def collect_full_html(page):

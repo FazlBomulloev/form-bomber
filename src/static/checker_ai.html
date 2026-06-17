@@ -623,6 +623,28 @@
       color: var(--text);
     }
 
+    .log-pre {
+      background: #0a0c12;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      margin-top: 6px;
+      font-family: 'JetBrains Mono', 'Consolas', monospace;
+      font-size: 11px;
+      color: #cbd5e1;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 320px;
+      overflow: auto;
+      line-height: 1.45;
+    }
+
+    .log-status {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+
     /* ── Empty ── */
     .empty {
       display: flex;
@@ -754,6 +776,7 @@
       <div class="sidebar-tabs">
         <button class="sidebar-tab active" onclick="showTab('tab-new',this)">Новая проверка</button>
         <button class="sidebar-tab" onclick="showTab('tab-history',this)">История</button>
+        <button class="sidebar-tab" onclick="showTab('tab-logs',this)">Логи</button>
       </div>
 
       <!-- Tab: New -->
@@ -828,6 +851,16 @@
             <p>Нет сессий</p>
           </div>
         </div>
+      </div>
+
+      <!-- Tab: Logs -->
+      <div id="tab-logs" class="tab-pane">
+        <div class="info-block">
+          Скачать архив со всеми <b>run.log</b> по всем сессиям. Логи хранятся 3 дня.
+        </div>
+        <button class="btn btn-primary btn-full" id="downloadLogsBtn" onclick="downloadAllLogs()">
+          Скачать архив логов
+        </button>
       </div>
 
 
@@ -1136,7 +1169,9 @@
     }
 
     function addResult(r) {
-      rowIndex++; r._idx = rowIndex; allRows.push(r);
+      rowIndex++; r._idx = rowIndex;
+      if (!r._sid) r._sid = currentSid;
+      allRows.push(r);
       stats.done++; stats.tokens += r.tokens_used || 0;
       if (r.status === 'success' || r.status === 'calltouch_api') stats.success++;
       else if (r.status === 'captcha') stats.captcha++;
@@ -1176,7 +1211,9 @@
         <td><span class="status-badge s-${r.status}">${label}</span></td>
         <td><span class="method-tag">${esc(method)}</span>${tokTag}${attemptTag}${reasonTag}</td>
         <td class="td-msg">${esc(r.message || '')}</td>
-        <td style="width:36px">${hasDetail ? `<button class="expand-btn" onclick="toggleDetail(${r._idx},this)">▶</button>` : ''}</td>`;
+        <td style="width:48px;white-space:nowrap">
+          ${hasDetail ? `<button class="expand-btn" onclick="toggleDetail(${r._idx},this)" title="AI заметки">▶</button>` : ''}
+        </td>`;
       tbody.insertBefore(tr, tbody.firstChild);
       if (hasDetail) {
         const dr = document.createElement('tr');
@@ -1192,6 +1229,28 @@
       const open = dr.style.display !== 'none';
       dr.style.display = open ? 'none' : '';
       btn.textContent = open ? '▶' : '▼';
+    }
+
+    async function downloadAllLogs() {
+      const btn = document.getElementById('downloadLogsBtn');
+      const oldText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Готовим архив...';
+      try {
+        const resp = await authFetch('/api/logs/download-all');
+        if (!resp.ok) { toast('Ошибка скачивания'); return; }
+        const blob = await resp.blob();
+        const cd = resp.headers.get('Content-Disposition') || '';
+        const m = cd.match(/filename="?([^";]+)"?/i);
+        const fname = m ? m[1] : 'logs.zip';
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = fname;
+        document.body.appendChild(a); a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (e) { toast('Ошибка скачивания'); }
+      finally { btn.disabled = false; btn.textContent = oldText; }
     }
 
     // ── Filter ──
@@ -1291,6 +1350,7 @@
         message: r.message, tokens_used: r.tokens_used || 0,
         ai_notes: r.ai_notes || '', reason_code: r.reason_code || '',
         attempt_no: r.attempt_no || 1,
+        _sid: sid,
       }));
       rowIndex = allRows.length;
       rebuildTable(); updateStats();
@@ -1329,6 +1389,7 @@
               message: r.message, tokens_used: r.tokens_used || 0,
               ai_notes: r.ai_notes || '', reason_code: r.reason_code || '',
               attempt_no: r.attempt_no || 1,
+              _sid: c.session_id || '',
             });
           }
           if (c.session_id) currentSid = c.session_id;
@@ -1375,6 +1436,7 @@
               message: r.message, tokens_used: r.tokens_used || 0,
               ai_notes: r.ai_notes || '', reason_code: r.reason_code || '',
               attempt_no: r.attempt_no || 1,
+              _sid: c.session_id || '',
             });
           }
           if (c.session_id) currentSid = c.session_id;

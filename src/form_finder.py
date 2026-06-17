@@ -3,8 +3,7 @@ import re
 from typing import Optional
 
 from config import (
-    MODAL_KEYWORDS, TRIGGER_BUTTON_SEL,
-    WIDGET_BLACKLIST_RE, BITRIX_FORM_TRIGGER_SEL,
+    TRIGGER_BUTTON_SEL, WIDGET_BLACKLIST_RE,
 )
 from models import FormContext
 from js_extractor import extract_form_json
@@ -66,6 +65,10 @@ _WIDGET_RE = re.compile(
     WIDGET_BLACKLIST_RE, re.I,
 )
 
+_TRIGGER_KEYWORDS_FLAT = [
+    kw for group in TRIGGER_PRIORITY for kw in group
+]
+
 
 async def _has_phone_visible(page) -> bool:
     try:
@@ -120,11 +123,21 @@ async def _wait_form_after_trigger(
 
 async def _is_widget_btn(el) -> bool:
     try:
-        sig = await el.evaluate(r"""el => {
+        sig = await el.evaluate(
+            r"""(el, keywords) => {
             const s = (
                 (el.className||'') + ' '
                 + (el.id||'') + ' '
                 + (el.getAttribute('data-name')||'')
+            ).toLowerCase();
+            const aria = (
+                (el.getAttribute('aria-label')||'')
+                + ' '
+                + (el.getAttribute('title')||'')
+                + ' '
+                + (el.getAttribute('data-tooltip')||'')
+                + ' '
+                + (el.getAttribute('data-text')||'')
             ).toLowerCase();
             const st = getComputedStyle(el);
             const fixed = (
@@ -137,13 +150,28 @@ async def _is_widget_btn(el) -> bool:
                 && r.width > 20
                 && Math.abs(r.width - r.height) < 15
             );
+            let kwHit = false;
+            if (aria) {
+                for (const kw of keywords) {
+                    if (kw && aria.indexOf(kw) !== -1) {
+                        kwHit = true;
+                        break;
+                    }
+                }
+            }
             return JSON.stringify({
-                sig, fixed, isRound,
+                sig, fixed, isRound, kwHit,
                 w: r.width, h: r.height,
             });
-        }""")
+        }""",
+            _TRIGGER_KEYWORDS_FLAT,
+        )
         import json
         info = json.loads(sig)
+        # Если aria/title содержит наши keywords —
+        # это не виджет, даже если fixed+круглая.
+        if info.get("kwHit"):
+            return False
         if _WIDGET_RE.search(info["sig"]):
             return True
         if info["fixed"] and info["isRound"]:
@@ -169,6 +197,35 @@ async def _collect_trigger_buttons(page):
             text = (
                 await el.inner_text()
             ).lower().strip()
+            if not text:
+                # пробуем aria-label, title, data-tooltip
+                for attr in (
+                    'aria-label', 'title',
+                    'data-tooltip', 'data-text',
+                ):
+                    val = await el.get_attribute(attr)
+                    if val:
+                        text = val.lower().strip()
+                        if text:
+                            break
+            if not text:
+                # последний шанс — вложенный <span>
+                try:
+                    span_text = await el.evaluate(
+                        r"""el => {
+                        const s = el.querySelector(
+                            'span'
+                        );
+                        return s
+                            ? (s.innerText || '')
+                                .trim()
+                            : '';
+                    }""",
+                    )
+                    if span_text:
+                        text = span_text.lower().strip()
+                except Exception:
+                    pass
             if not text or len(text) > 60:
                 continue
             if text in seen_texts:
@@ -450,38 +507,197 @@ async def _aggressive_form_reveal(page):
     return None
 
 
+async def _find_in_iframes(page):
+    """Параллельный обход всех child-фреймов: первый
+    же фрейм с лидовой формой (phone-поле) выигрывает."""
+    log = get_logger()
+    targets = [
+        f for f in page.frames
+        if f != page.main_frame
+    ]
+    if not targets:
+        return None, None
+
+    async def _scan(frame):
+        try:
+            data = await asyncio.wait_for(
+                extract_form_json(frame), timeout=4,
+            )
+        except Exception:
+            return frame, None
+        if not data or not data.get("fields"):
+            return frame, None
+        if not any(
+            f.get("role") == "phone"
+            for f in data["fields"]
+        ):
+            return frame, None
+        return frame, data
+
+    tasks = [
+        asyncio.create_task(_scan(fr))
+        for fr in targets
+    ]
+    try:
+        for done in asyncio.as_completed(tasks):
+            frame, data = await done
+            if not data:
+                continue
+            if log:
+                log.ok(
+                    f"форма в iframe: "
+                    f"{len(data['fields'])} полей "
+                    f"({frame.url[:60]})"
+                )
+            return data, frame
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+    return None, None
+
+
+async def _mutation_observer_retry(page):
+    """Если форма не нашлась — ждём 3 сек, наблюдая
+    за DOM. Триггерим scroll/mouseenter. Если phone
+    input появился — повторяем extract_form_json."""
+    log = get_logger()
+    try:
+        await page.evaluate(r"""() => {
+            window.__fbFormAppeared = false;
+            if (window.__fbFormMO) {
+                try { window.__fbFormMO.disconnect(); }
+                catch(e) {}
+            }
+            const mo = new MutationObserver(() => {
+                if (window.__fbFormAppeared) return;
+                const phoneEl = document.querySelector(
+                    'input[type="tel"],'
+                    + 'input[name*="phone" i],'
+                    + 'input[placeholder*="телефон" i],'
+                    + 'input[inputmode="tel"]'
+                );
+                if (phoneEl) {
+                    try {
+                        const r = phoneEl.getBoundingClientRect();
+                        if (r.width > 5 && r.height > 5)
+                            window.__fbFormAppeared = true;
+                    } catch(e) {}
+                }
+            });
+            mo.observe(document.body, {
+                childList: true, subtree: true,
+                attributes: true,
+                attributeFilter: ['style','class'],
+            });
+            window.__fbFormMO = mo;
+        }""")
+    except Exception:
+        return None
+
+    # Триггерим scroll + hover на body
+    try:
+        await page.evaluate(r"""() => {
+            window.scrollTo(0, document.body.scrollHeight / 2);
+            window.dispatchEvent(new Event('scroll'));
+            const evt = new MouseEvent('mouseenter', {bubbles: true});
+            document.body.dispatchEvent(evt);
+        }""")
+    except Exception:
+        pass
+
+    # Ждём до 3 сек
+    for _ in range(15):
+        await asyncio.sleep(0.2)
+        try:
+            appeared = await page.evaluate(
+                "() => window.__fbFormAppeared",
+            )
+            if appeared:
+                if log:
+                    log.ok(
+                        "MutationObserver: "
+                        "phone field появился",
+                    )
+                break
+        except Exception:
+            break
+
+    # Disconnect observer
+    try:
+        await page.evaluate(r"""() => {
+            try { window.__fbFormMO?.disconnect(); }
+            catch(e) {}
+            window.__fbFormMO = null;
+        }""")
+    except Exception:
+        pass
+
+    # Повторный extract
+    data = await extract_form_json(page)
+    return data
+
+
 async def extract_forms(page) -> tuple:
     log = get_logger()
 
     await scroll_page_for_lazy(page)
 
-    # ── Шаг 1: DOM ──────────────────────────
+    # ── Шаг 1a: DOM main_frame + iframe параллельно ──
     if log:
         log.step("extract", "ищем форму в DOM")
-    form_json = await extract_form_json(page)
+
+    main_task = asyncio.create_task(
+        extract_form_json(page),
+    )
+    iframe_task = asyncio.create_task(
+        _find_in_iframes(page),
+    )
+
+    form_json = None
+    try:
+        form_json = await main_task
+    except Exception:
+        form_json = None
+
+    has_phone_main = False
+    source_main = ""
     if form_json and form_json.get("fields"):
-        has_phone = any(
+        has_phone_main = any(
             f.get("role") == "phone"
             for f in form_json["fields"]
         )
-        source = form_json.get("source", "form")
-        if has_phone and source not in (
-            "hidden_form",
-        ):
-            if log:
-                log.ok(
-                    f"форма в DOM: "
-                    f"{len(form_json['fields'])} полей"
-                )
-            return form_json, FormContext(
-                html="", source="form",
+        source_main = form_json.get("source", "form")
+
+    if has_phone_main and source_main not in (
+        "hidden_form",
+    ):
+        iframe_task.cancel()
+        if log:
+            log.ok(
+                f"форма в DOM: "
+                f"{len(form_json['fields'])} полей"
             )
-        if has_phone:
-            hidden_backup = form_json
-        else:
-            hidden_backup = None
-    else:
-        hidden_backup = None
+        return form_json, FormContext(
+            html="", source="form",
+        )
+
+    # main не дал лидовой формы — ждём iframe
+    iframe_form, iframe_frame = None, None
+    try:
+        iframe_form, iframe_frame = await iframe_task
+    except Exception:
+        iframe_form, iframe_frame = None, None
+
+    if iframe_form:
+        return iframe_form, FormContext(
+            html="", source="iframe",
+            frame=iframe_frame,
+        )
+
+    hidden_backup = (
+        form_json if has_phone_main else None
+    )
 
     # ── Шаг 2: кнопки по приоритету ──────────
     if log:
@@ -493,7 +709,7 @@ async def extract_forms(page) -> tuple:
 
     trigger_tries = 0
     for priority, text, el in buttons:
-        if trigger_tries >= 5:
+        if trigger_tries >= 10:
             break
         trigger_tries += 1
         try:
@@ -606,42 +822,31 @@ async def extract_forms(page) -> tuple:
             html="", source="hidden_form",
         )
 
-    # ── Шаг 4: поиск в iframe ──────────────
-    if log:
-        log.step("iframe", "ищем форму в iframe")
-    try:
-        for frame in page.frames:
-            if frame == page.main_frame:
-                continue
-            try:
-                iframe_form = await extract_form_json(
-                    frame
-                )
-                if (
-                    iframe_form
-                    and iframe_form.get("fields")
-                ):
-                    has_phone = any(
-                        f.get("role") == "phone"
-                        for f in iframe_form["fields"]
-                    )
-                    if has_phone:
-                        if log:
-                            log.ok(
-                                f"форма в iframe: "
-                                f"{len(iframe_form['fields'])}"
-                                f" полей"
-                            )
-                        return iframe_form, FormContext(
-                            html="", source="iframe",
-                            frame=frame,
-                        )
-            except Exception:
-                continue
-    except Exception:
-        pass
+    # ── Шаг 4: повторный обход iframe ─────
+    # На случай если фрейм только что появился
+    # после кликов или JS-reveal.
+    iframe_form2, frame2 = await _find_in_iframes(page)
+    if iframe_form2:
+        return iframe_form2, FormContext(
+            html="", source="iframe",
+            frame=frame2,
+        )
 
-    # ── Шаг 5: не нашли ─────────────────────
+    # ── Шаг 6: MutationObserver retry ────────
+    mo_form = await _mutation_observer_retry(page)
+    if mo_form and mo_form.get("fields"):
+        has_phone = any(
+            f.get("role") == "phone"
+            for f in mo_form["fields"]
+        )
+        if has_phone:
+            if log:
+                log.ok("форма после MutationObserver")
+            return mo_form, FormContext(
+                html="", source="mutation_observer",
+            )
+
+    # ── Шаг 7: не нашли ─────────────────────
     if log:
         log.warn("форма не найдена ни в DOM, "
                  "ни по кнопкам, ни в iframe")
@@ -790,92 +995,6 @@ def build_smart_plan(form_json: dict) -> dict:
         ],
         "notes": notes,
     }
-
-
-async def reopen_form(
-    page, ctx: FormContext, phone_sel: str,
-) -> bool:
-    if await _has_phone_visible(page):
-        return True
-
-    if ctx.trigger_text:
-        buttons = (
-            await _collect_trigger_buttons(page)
-        )
-        trigger_low = ctx.trigger_text.lower()[:20]
-        for _, text, el in buttons:
-            if trigger_low in text:
-                try:
-                    await el.click()
-                    ok = (
-                        await _wait_form_after_trigger(
-                            page, timeout=5000,
-                        )
-                    )
-                    if ok:
-                        return True
-                except Exception:
-                    pass
-
-    if ctx.source == "tilda_popup" and ctx.trigger_href:
-        target_low = ctx.trigger_href.lower()
-        for link in await page.query_selector_all(
-            'a[href^="#popup:"],'
-            'a[href^="#Popup:"]'
-        ):
-            href = (
-                await link.get_attribute('href') or ''
-            ).lower()
-            if href != target_low:
-                continue
-            if not await link.is_visible():
-                continue
-            try:
-                await link.click()
-                await asyncio.sleep(3.5)
-                if await _has_phone_visible(page):
-                    return True
-            except Exception:
-                pass
-
-    fallback_sel = (
-        'button,a[href^="#popup:"],'
-        '[data-action="modal"],'
-        '[data-toggle="modal"],'
-        '[data-modal],[data-popup],'
-        f'{BITRIX_FORM_TRIGGER_SEL}'
-    )
-    for el in await page.query_selector_all(
-        fallback_sel
-    ):
-        try:
-            if not await el.is_visible():
-                continue
-            text = (await el.inner_text()).lower()
-            href = (
-                await el.get_attribute('href') or ''
-            ).lower()
-            is_modal = (
-                any(
-                    kw in text
-                    for kw in MODAL_KEYWORDS
-                )
-                or '#popup:' in href
-            )
-            if not is_modal:
-                continue
-            await el.click()
-            ok = await _wait_form_after_trigger(
-                page, timeout=5000,
-            )
-            if ok:
-                return True
-            await page.keyboard.press('Escape')
-            await asyncio.sleep(0.3)
-        except Exception:
-            continue
-
-    return False
 
 
 async def resolve_form_el(

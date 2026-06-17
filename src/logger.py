@@ -26,7 +26,6 @@ class SiteLogger:
         self._w(
             self._runlog,
             f"{'=' * 72}\n{ts}  {url}\n{'=' * 72}\n",
-            mode="w",
         )
 
     def _t(self) -> float:

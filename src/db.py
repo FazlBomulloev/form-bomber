@@ -56,6 +56,25 @@ async def db_init():
             )
         """)
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS form_profiles (
+                domain           TEXT PRIMARY KEY,
+                form_selector    TEXT DEFAULT '',
+                submit_selector  TEXT DEFAULT '',
+                actions_json     TEXT DEFAULT '[]',
+                has_captcha      INTEGER DEFAULT 0,
+                captcha_type     TEXT DEFAULT '',
+                success_method   TEXT DEFAULT '',
+                success_signal   TEXT DEFAULT '',
+                success_match    TEXT DEFAULT '',
+                success_count    INTEGER DEFAULT 0,
+                fail_count       INTEGER DEFAULT 0,
+                last_success_at  TEXT,
+                last_failed_at   TEXT,
+                created_at       TEXT DEFAULT
+                    (datetime('now','localtime'))
+            )
+        """)
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS queue_clients (
                 id         INTEGER PRIMARY KEY
                            AUTOINCREMENT,
@@ -322,5 +341,98 @@ async def db_recover_stale_queues():
         await db.execute(
             "UPDATE queue_clients SET status='done' "
             "WHERE status IN ('running','paused_hours')"
+        )
+        await db.commit()
+
+
+# ── Form profiles cache ────────────────────────
+
+
+async def db_get_form_profile(domain: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM form_profiles WHERE domain=?",
+            (domain,),
+        ) as c:
+            row = await c.fetchone()
+            return dict(row) if row else None
+
+
+async def db_save_form_profile(
+    domain: str,
+    form_selector: str,
+    submit_selector: str,
+    actions: list,
+    has_captcha: bool,
+    captcha_type: str,
+    success_method: str,
+    success_signal: str,
+    success_match: str,
+):
+    actions_json = json.dumps(
+        actions, ensure_ascii=False,
+    )
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO form_profiles ("
+            "domain,form_selector,submit_selector,"
+            "actions_json,has_captcha,captcha_type,"
+            "success_method,success_signal,"
+            "success_match,success_count,fail_count,"
+            "last_success_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,1,0,"
+            "datetime('now','localtime')) "
+            "ON CONFLICT(domain) DO UPDATE SET "
+            "form_selector=excluded.form_selector,"
+            "submit_selector=excluded.submit_selector,"
+            "actions_json=excluded.actions_json,"
+            "has_captcha=excluded.has_captcha,"
+            "captcha_type=excluded.captcha_type,"
+            "success_method=excluded.success_method,"
+            "success_signal=excluded.success_signal,"
+            "success_match=excluded.success_match,"
+            "success_count=success_count+1,"
+            "fail_count=0,"
+            "last_success_at="
+            "datetime('now','localtime')",
+            (
+                domain, form_selector or "",
+                submit_selector or "", actions_json,
+                1 if has_captcha else 0,
+                captcha_type or "",
+                success_method or "",
+                success_signal or "",
+                (success_match or "")[:200],
+            ),
+        )
+        await db.commit()
+
+
+async def db_increment_profile_fail(domain: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE form_profiles SET "
+            "fail_count=fail_count+1,"
+            "last_failed_at="
+            "datetime('now','localtime') "
+            "WHERE domain=?",
+            (domain,),
+        )
+        await db.commit()
+        async with db.execute(
+            "SELECT fail_count FROM form_profiles "
+            "WHERE domain=?",
+            (domain,),
+        ) as c:
+            row = await c.fetchone()
+            return row[0] if row else 0
+
+
+async def db_delete_form_profile(domain: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM form_profiles WHERE domain=?",
+            (domain,),
         )
         await db.commit()

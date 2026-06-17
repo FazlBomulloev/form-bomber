@@ -1,6 +1,5 @@
 PORT           = 8002
 DB_PATH        = "data/checker_ai.db"
-PROFILES_PATH  = "data/ai_profiles.json"
 CONCURRENCY    = 2
 AI_CONCURRENCY = 3
 
@@ -11,53 +10,10 @@ MSK_UTC_OFFSET  = 3
 RUCAPTCHA_IN  = "https://rucaptcha.com/in.php"
 RUCAPTCHA_RES = "https://rucaptcha.com/res.php"
 
-OPENAI_VISION_BASE_URL = "https://api.artemox.com/v1"
-OPENAI_VISION_MODEL    = "gpt-4o"
-VISION_MAX_WIDTH       = 1280
-
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
-)
-
-MODAL_KW_CALLBACK = [
-    "заказать звонок", "обратный звонок",
-    "перезвоните", "жду звонка",
-    "callback", "перезвонить",
-]
-MODAL_KW_CONSULT = [
-    "получить консультацию",
-    "бесплатная консультация",
-    "консультация", "связаться",
-    "обратная связь", "оставить заявку",
-]
-MODAL_KW_BOOK = [
-    "записаться", "запись",
-    "записаться на приём", "записаться на прием",
-    "онлайн-запись", "запись онлайн",
-    "выбрать время", "забронировать",
-]
-MODAL_KW_OTHER = [
-    "заявк", "звонок", "перезвон", "оставить",
-    "рассчитать", "стоимость", "диагностик",
-    "узнать цену", "получить",
-    "задать вопрос", "написать нам",
-    "отправить сообщение",
-]
-MODAL_KEYWORDS = (
-    MODAL_KW_CALLBACK + MODAL_KW_CONSULT
-    + MODAL_KW_BOOK + MODAL_KW_OTHER
-)
-
-BITRIX_FORM_TRIGGER_SEL = (
-    "[data-b24-form-id],[data-bx-form-id],"
-    "[data-bx-web-form-id],[data-bx24-form-id],"
-    "button.b24-form-btn,a.b24-form-btn,"
-    ".b24-form-button button,.b24-form-button a,"
-    "[class*='b24-form-button' i],"
-    "[onclick*='b24form' i],"
-    "[onclick*='CrmWebForm' i]"
 )
 
 PHONE_FALLBACKS = [

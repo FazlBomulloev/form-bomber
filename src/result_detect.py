@@ -1,45 +1,119 @@
+import html as _html
+import json as _json
 import re as _re
+from urllib.parse import unquote_plus as _unquote
 from config import SUCCESS_TEXTS, ERROR_PHRASES
 from logger import get_logger as _get_log
 
-_SKIP_URL_RE = _re.compile(
-    r"metric|analytic|yandex\.(ru|net)/watch|google"
-    r"(-analytics|tagmanager)|pixel|beacon|mc\.yandex"
-    r"|doubleclick|facebook\.com/(tr|events)|hotjar"
-    r"|gtag|collect\?|\.gif\?|fonts\.|\.css\?|\.js\?"
-    r"|favicon|\.png|\.jpg|\.svg|\.woff",
-    _re.IGNORECASE,
-)
 
-_OK_RE = _re.compile(
+def _decode_post_body(s: str) -> str:
+    """Нормализует POST body: URL-decode, HTML entities,
+    JSON unicode-escape — чтобы телефон совпал в любом
+    формате (form-urlencoded / JSON / multipart)."""
+    if not s:
+        return ""
+    try:
+        s = _unquote(s)
+    except Exception:
+        pass
+    try:
+        s = _html.unescape(s)
+    except Exception:
+        pass
+    try:
+        # + → +, 0 → 0 и т.п.
+        s = _re.sub(
+            r"\\u([0-9a-fA-F]{4})",
+            lambda m: chr(int(m.group(1), 16)),
+            s,
+        )
+    except Exception:
+        pass
+    return s
+
+# ── Единые паттерны (используются и в Python и в JS) ─
+OK_PATTERN = (
     r"success|\"ok\"|\"status\"\s*:\s*\"?(?:ok|true)"
     r"|спасибо|thank|принят|отправлен|записан|получили"
     r"|\"result\"\s*:\s*\"?(?:ok|success)|mail_sent"
     r"|sent_ok|\"sent\"\s*:\s*true|\"message_sent\""
     r"|благодар|заявка\s"
     r"|\"code\"\s*:\s*1\b"
-    r"|\"response\"\s*:\s*1\b",
-    _re.IGNORECASE,
+    r"|\"response\"\s*:\s*1\b"
 )
-
-_ERR_RE = _re.compile(
+ERR_PATTERN = (
     r"error|\"status\"\s*:\s*\"?(?:fail|error)"
-    r"|ошибка|invalid|captcha|validation",
-    _re.IGNORECASE,
+    r"|ошибка|invalid|captcha|validation"
 )
-
-_CAPTCHA_RE = _re.compile(
-    r"needcaptcha|captcha.required|captcha_required",
-    _re.IGNORECASE,
+# Однозначные признаки провала: ловят false-positive,
+# когда тело содержит слово "success" внутри
+# "success":false и т.п. Если STRICT_ERR матчится —
+# OK-сигналы из того же body не учитываем.
+STRICT_ERR_PATTERN = (
+    r"\"success\"\s*:\s*false"
+    r"|\"ok\"\s*:\s*false"
+    r"|\"error\"\s*:\s*true"
+    r"|\"errors\"\s*:\s*\{[^}]*\""
+    r"|\"status\"\s*:\s*\"?(?:fail|error|invalid)"
+    r"|class\s*=\s*\"[^\"]*\b(?:error|invalid|fail)\b"
+    r"|class\s*=\s*'[^']*\b(?:error|invalid|fail)\b"
 )
-
-_FORM_URL_RE = _re.compile(
+# Сильные success-сигналы, которые даже на фоне
+# strict-error остаются истиной (mail_sent у wpcf7).
+STRONG_OK_PATTERN = (
+    r"mail_sent|message_sent|sent_ok"
+    r"|wpcf7mailsent"
+)
+CAPTCHA_PATTERN = (
+    r"needcaptcha|captcha.required|captcha_required"
+)
+FORM_URL_PATTERN = (
     r"lead|form|contact|submit|send|zapis|callback"
     r"|order|request|feedback|mail|appointment"
     r"|procces|ajax|application|bid|zakaz|consult"
-    r"|обратн|заявк",
-    _re.IGNORECASE,
+    r"|обратн|заявк"
 )
+SKIP_URL_PATTERN = (
+    r"metric|analytic|yandex\.(ru|net)/watch|google"
+    r"(-analytics|tagmanager)|pixel|beacon|mc\.yandex"
+    r"|doubleclick|facebook\.com/(tr|events)|hotjar"
+    r"|gtag|collect\?|\.gif\?|fonts\.|\.css\?|\.js\?"
+    r"|favicon|\.png|\.jpg|\.svg|\.woff"
+)
+
+_OK_RE = _re.compile(OK_PATTERN, _re.IGNORECASE)
+_ERR_RE = _re.compile(ERR_PATTERN, _re.IGNORECASE)
+_STRICT_ERR_RE = _re.compile(
+    STRICT_ERR_PATTERN, _re.IGNORECASE,
+)
+_STRONG_OK_RE = _re.compile(
+    STRONG_OK_PATTERN, _re.IGNORECASE,
+)
+_CAPTCHA_RE = _re.compile(
+    CAPTCHA_PATTERN, _re.IGNORECASE,
+)
+_FORM_URL_RE = _re.compile(
+    FORM_URL_PATTERN, _re.IGNORECASE,
+)
+_SKIP_URL_RE = _re.compile(
+    SKIP_URL_PATTERN, _re.IGNORECASE,
+)
+
+
+def _looks_like_success(body: str) -> bool:
+    """OK-сигнал в body, но если есть strict-error и
+    нет сильного OK — это всё-таки провал."""
+    if not body:
+        return False
+    if _STRICT_ERR_RE.search(body) and not _STRONG_OK_RE.search(body):
+        return False
+    return bool(_OK_RE.search(body))
+
+
+def _js_re(pattern: str) -> str:
+    """Сериализует паттерн как литерал JS-строки
+    для безопасной подстановки в page.evaluate."""
+    return _json.dumps(pattern)
 
 
 class PlaywrightNetworkListener:
@@ -81,12 +155,8 @@ class PlaywrightNetworkListener:
                     "post_data": post_data[:500],
                 })
                 if log:
-                    has_phone = (
-                        self._phone_short
-                        and self._phone_short
-                        in _re.sub(
-                            r"\D", "", post_data,
-                        )
+                    has_phone = self._is_our_request(
+                        post_data,
                     )
                     log.step(
                         "net_capture",
@@ -122,10 +192,11 @@ class PlaywrightNetworkListener:
         self._raw.clear()
 
     def _is_our_request(self, post_data):
-        """POST содержит наш телефон?"""
-        if not self._phone_short:
+        """POST содержит наш телефон в любом формате?"""
+        if not self._phone_short or not post_data:
             return False
-        digits = _re.sub(r"\D", "", post_data)
+        decoded = _decode_post_body(post_data)
+        digits = _re.sub(r"\D", "", decoded)
         return self._phone_short in digits
 
     async def check_result(self):
@@ -192,8 +263,18 @@ class PlaywrightNetworkListener:
 
             r = None
             body_stripped = body.strip()
+            ok_like = _looks_like_success(body)
+            strict_err = bool(
+                body and _STRICT_ERR_RE.search(body)
+                and not _STRONG_OK_RE.search(body)
+            )
             if 200 <= status < 300:
-                if body and _OK_RE.search(body):
+                if strict_err:
+                    r = {
+                        "state": "error",
+                        "match": "NET: " + body[:60],
+                    }
+                elif ok_like:
                     r = {
                         "state": "success",
                         "match": "NET: " + body[:60],
@@ -219,7 +300,7 @@ class PlaywrightNetworkListener:
                 status >= 400
                 or (body and _ERR_RE.search(body))
             ):
-                if not (body and _OK_RE.search(body)):
+                if not ok_like:
                     r = {
                         "state": "error",
                         "match": (
@@ -232,10 +313,20 @@ class PlaywrightNetworkListener:
                 continue
 
             if is_ours:
-                if (
-                    our_result is None
-                    or r["state"] == "success"
+                # Приоритет внутри our:
+                #   success > error > likely_success
+                if r["state"] == "success":
+                    our_result = r
+                elif (
+                    r["state"] == "error"
+                    and (
+                        our_result is None
+                        or our_result["state"]
+                        != "success"
+                    )
                 ):
+                    our_result = r
+                elif our_result is None:
                     our_result = r
             else:
                 if other_result is None:
@@ -290,8 +381,13 @@ async def _fallback_detect(page, pre_text, url_changed):
             pass
         if any(
             w in url for w in (
-                "thank", "success", "спасибо",
-                "заявка", "blagodar",
+                "thank", "success", "спасиб",
+                "заявк", "blagodar",
+                "sent", "done", "complet",
+                "confirm", "received",
+                "принят", "отправлен", "готово",
+                "formstatus", "order-success",
+                "order_success", "ordersuccess",
             )
         ):
             return {
@@ -308,10 +404,76 @@ async def _fallback_detect(page, pre_text, url_changed):
 
 async def setup_xhr_listener(page):
     """Перехватывает fetch/XHR чтобы отследить
-    ответы сервера после submit."""
+    ответы сервера после submit. Ring-buffer до 100
+    записей, чтобы не утекать на SPA."""
     try:
         await page.evaluate(r"""() => {
             window.__fbXHR = [];
+            const MAX = 100;
+
+            // ── CMS events: WordPress (wpcf7), Tilda,
+            //    Bitrix24, Jivo и др. — самый сильный
+            //    signal на этих платформах.
+            window.__fbCmsSuccess = null;
+            const cmsEvents = [
+                'wpcf7mailsent', 'wpcf7submit',
+                'tildaformsubmit', 'tildaform.success',
+                'bxFormSuccess', 'b24:form:submit',
+                'jivo:webhook',
+                'formSubmitSuccess', 'form:submitted',
+            ];
+            for (const evt of cmsEvents) {
+                try {
+                    document.addEventListener(evt, (e) => {
+                        if (!window.__fbCmsSuccess)
+                            window.__fbCmsSuccess = evt;
+                    });
+                    window.addEventListener(evt, (e) => {
+                        if (!window.__fbCmsSuccess)
+                            window.__fbCmsSuccess = evt;
+                    });
+                } catch(_) {}
+            }
+            window.__fbCmsError = null;
+            for (const evt of [
+                'wpcf7mailfailed',
+                'wpcf7invalid',
+                'wpcf7spam',
+            ]) {
+                try {
+                    document.addEventListener(evt, (e) => {
+                        if (!window.__fbCmsError)
+                            window.__fbCmsError = evt;
+                    });
+                } catch(_) {}
+            }
+
+            // ── Navigation API: SPA-роутинг после submit
+            window.__fbNavSuccess = null;
+            if (window.navigation
+                && navigation.addEventListener) {
+                try {
+                    navigation.addEventListener(
+                        'navigatesuccess', (e) => {
+                        try {
+                            if (e.navigation
+                                && e.navigation.formData)
+                                window.__fbNavSuccess =
+                                    location.href;
+                        } catch(_) {}
+                    });
+                } catch(_) {}
+            }
+
+            const SKIP = /metric|analytic|pixel|beacon|gtag|fonts\.|\.css\?|\.js\?|favicon|\.png|\.jpg|\.svg|\.woff/i;
+            const push = (e) => {
+                if (e.url && SKIP.test(e.url)) return;
+                window.__fbXHR.push(e);
+                if (window.__fbXHR.length > MAX)
+                    window.__fbXHR.splice(
+                        0, window.__fbXHR.length - MAX,
+                    );
+            };
 
             // Patch fetch
             const _f = window.fetch;
@@ -320,7 +482,7 @@ async def setup_xhr_listener(page):
                 try {
                     const c = r.clone();
                     const t = await c.text();
-                    window.__fbXHR.push({
+                    push({
                         url: (a[0]?.url || a[0]
                             || '').toString()
                             .substring(0, 200),
@@ -346,7 +508,7 @@ async def setup_xhr_listener(page):
                     this.addEventListener('load',
                         function() {
                         try {
-                            window.__fbXHR.push({
+                            push({
                                 url: this._u || '',
                                 s: this.status,
                                 b: (this.responseText
@@ -367,16 +529,45 @@ async def check_xhr_result(page):
     """Проверяет перехваченные XHR/fetch на
     признаки успеха или ошибки."""
     try:
-        return await page.evaluate(r"""() => {
+        return await page.evaluate(
+            r"""(pats) => {
+            // ── Приоритет: CMS-события и Navigation API
+            if (window.__fbCmsSuccess)
+                return {
+                    state: 'success',
+                    match: 'CMS event: '
+                        + window.__fbCmsSuccess,
+                };
+            if (window.__fbCmsError)
+                return {
+                    state: 'error',
+                    match: 'CMS event: '
+                        + window.__fbCmsError,
+                };
+            if (window.__fbNavSuccess)
+                return {
+                    state: 'success',
+                    match: 'NAV: '
+                        + window.__fbNavSuccess
+                            .substring(0, 80),
+                };
+
             const rs = window.__fbXHR || [];
             if (!rs.length) return null;
 
-            const okRe =
-                /success|"ok"|"status":\s*"?(?:ok|true)|спасибо|thank|принят|отправлен|записан|получили|"result":\s*"?(?:ok|success)|mail_sent|sent_ok|"sent":\s*true|"message_sent"|благодар/i;
-            const errRe =
-                /error|"status":\s*"?(?:fail|error)|ошибка|invalid|captcha|validation/i;
-            const skipUrlRe =
-                /metric|analytic|yandex|google|pixel|beacon|log|stat/;
+            const okRe = new RegExp(pats.ok, 'i');
+            const errRe = new RegExp(pats.err, 'i');
+            const strictErrRe = new RegExp(pats.strictErr, 'i');
+            const strongOkRe = new RegExp(pats.strongOk, 'i');
+            const skipUrlRe = new RegExp(pats.skip, 'i');
+
+            // Тело "выглядит как success", только если нет
+            // strict-error без сильного OK-сигнала.
+            function looksOk(b) {
+                if (strictErrRe.test(b) && !strongOkRe.test(b))
+                    return false;
+                return okRe.test(b);
+            }
 
             let hasSuccess = false;
             let successResult = null;
@@ -392,8 +583,12 @@ async def check_xhr_result(page):
                 const u = (r.url||'').toLowerCase();
                 if (skipUrlRe.test(u)) continue;
 
+                const ok = looksOk(b);
+                const strictErr = strictErrRe.test(b)
+                    && !strongOkRe.test(b);
+
                 if (!hasSuccess && r.s >= 200
-                    && r.s < 300 && okRe.test(b)) {
+                    && r.s < 300 && ok) {
                     hasSuccess = true;
                     successResult = {
                         state: 'success',
@@ -410,8 +605,11 @@ async def check_xhr_result(page):
                     };
                 }
                 if (!hasError
-                    && (r.s >= 400 || errRe.test(b))
-                    && !okRe.test(b)
+                    && (
+                        strictErr
+                        || r.s >= 400
+                        || (errRe.test(b) && !ok)
+                    )
                     && !/needcaptcha/.test(b)) {
                     hasError = true;
                     errorResult = {
@@ -437,7 +635,16 @@ async def check_xhr_result(page):
                 }
             }
             return null;
-        }""")
+        }""", {
+            "ok": OK_PATTERN,
+            "err": ERR_PATTERN,
+            "strictErr": STRICT_ERR_PATTERN,
+            "strongOk": STRONG_OK_PATTERN,
+            "skip": (
+                "metric|analytic|yandex|google"
+                "|pixel|beacon|log|stat"
+            ),
+        })
     except Exception:
         return None
 
@@ -641,7 +848,7 @@ async def detect_submission_result(
             if (formGone) {
                 if (urlChanged) {
                     const url = location.href.toLowerCase();
-                    if (/thank|success|спасибо|заявка|blagodar/.test(url))
+                    if (/thank|success|спасиб|заявк|blagodar|sent|done|complet|confirm|received|принят|отправлен|готово|formstatus|order.?success/i.test(url))
                         return {state: 'likely_success',
                             match: 'redirect to success URL'};
                     // Ищем success в заголовках новой стр.
@@ -729,6 +936,17 @@ async def detect_submission_result(
     if net and net.get("state") == "success":
         return net
 
+    # ── 1b. NET error на нашем POST бьёт DOM success ─
+    # Если сервер вернул 4xx/5xx или error-body на
+    # запросе с нашим телефоном, доверять кешированному
+    # "спасибо" в DOM нельзя.
+    if (
+        net
+        and net.get("state") == "error"
+        and "NET" in net.get("match", "")
+    ):
+        return net
+
     # ── 2. JS-level XHR ──
     xhr = await check_xhr_result(page)
     if _log:
@@ -753,6 +971,34 @@ async def detect_submission_result(
         ):
             return net
 
+    # ── 3b. Защита от false-positive "form reset" ──
+    # Если DOM сказал likely_success по сбросу полей,
+    # но в сети нет ни одного нашего POST — это
+    # подозрительно (форма могла сброситься из-за
+    # клиентской валидации без отправки).
+    if (
+        dom_result.get("state") == "likely_success"
+        and "form reset" in dom_result.get("match", "")
+    ):
+        has_our_post = False
+        if net_listener:
+            for entry in net_listener._raw:
+                if net_listener._is_our_request(
+                    entry.get("post_data", ""),
+                ):
+                    has_our_post = True
+                    break
+        if not has_our_post:
+            if _log:
+                _log.warn(
+                    "form_reset без нашего POST — "
+                    "понижаем до unchanged",
+                )
+            dom_result = {
+                "state": "unchanged",
+                "match": "form reset (unverified)",
+            }
+
     # ── 4. DOM ──
     ds = dom_result.get("state")
     if ds not in ("unchanged", "likely_failed"):
@@ -765,40 +1011,6 @@ async def detect_submission_result(
         return net
 
     return dom_result
-
-
-async def detect_client_validation_error(page):
-    try:
-        return await page.evaluate(r"""() => {
-            const invalid = document.querySelectorAll(
-                ':invalid, .is-invalid, '
-                + '[aria-invalid="true"], '
-                + '.error:not(nav), '
-                + '.field-error'
-            );
-            const msgs = [];
-            for (const el of invalid) {
-                try {
-                    const st = getComputedStyle(el);
-                    if (st.display === 'none'
-                        || st.visibility === 'hidden')
-                        continue;
-                    const msg =
-                        el.validationMessage
-                        || el.title
-                        || (el.innerText || '')
-                            .trim()
-                            .substring(0, 60);
-                    if (msg) msgs.push(msg);
-                } catch(e) {}
-            }
-            return {
-                has_errors: msgs.length > 0,
-                messages: msgs.slice(0, 5),
-            };
-        }""")
-    except Exception:
-        return {"has_errors": False, "messages": []}
 
 
 async def get_invalid_field_hint(page):
