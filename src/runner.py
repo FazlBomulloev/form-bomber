@@ -528,13 +528,14 @@ async def check_site_v2(
     firstname: str = "", lastname: str = "",
     patronymic: str = "",
     email: str = "", comment: str = "",
-    claude_key: str = "",
+    ai_key: str = "",
     rucaptcha_key: str = "",
     attempt_no: int = 1,
     max_retries: int = 6,
     prev_hint: dict = None,
     proxy: dict = None,
     session_id: str = "",
+    ai_provider: str = "claude",
 ):
     domain = domain_from_url(url)
     sid_log_dir = (
@@ -837,11 +838,11 @@ async def check_site_v2(
             # ── 5. AI fallback ─────────────────
             if (
                 result["status"] != "success"
-                and claude_key
+                and ai_key
             ):
                 _logger.step(
                     "ai",
-                    "отправляем HTML в Claude",
+                    f"отправляем HTML в {ai_provider}",
                 )
                 page_html = await collect_full_html(
                     page
@@ -852,13 +853,14 @@ async def check_site_v2(
                             ai_plan, ai_tokens, _,
                         ) = await asyncio.to_thread(
                             ask_ai_sync,
-                            page_html, url, claude_key,
+                            page_html, url, ai_key,
+                            ai_provider,
                         )
                         tokens += ai_tokens
                         _logger.log_ai(
                             f"html={len(page_html)}",
                             ai_plan, ai_tokens,
-                            "claude",
+                            ai_provider,
                         )
                     except Exception as e:
                         raw_text = getattr(
@@ -879,7 +881,7 @@ async def check_site_v2(
                                 pass
                         _logger.log_ai(
                             "", {}, err_tokens,
-                            "claude",
+                            ai_provider,
                             error=str(e)[:200],
                         )
                         ai_plan = None
@@ -896,7 +898,7 @@ async def check_site_v2(
                             patronymic,
                             email, comment,
                             rucaptcha_key, url,
-                            step_dir, "claude",
+                            step_dir, ai_provider,
                             context=iframe_ctx,
                         )
                     )
@@ -911,7 +913,7 @@ async def check_site_v2(
                     else:
                         result.update({
                             "status": "uncertain",
-                            "method": "form_claude",
+                            "method": f"form_{ai_provider}",
                             "message": (
                                 "DOM не изменился "
                                 "после AI заполнения"
@@ -933,7 +935,7 @@ async def check_site_v2(
             # ── Нет ключа AI и нет формы ───────
             if (
                 result["status"] != "success"
-                and not claude_key
+                and not ai_key
                 and not form_json
             ):
                 result["message"] = (
@@ -1105,10 +1107,11 @@ async def check_site_v2(
 async def _process_one(
     url, phone, firstname, lastname, patronymic,
     email, comment,
-    claude_key, rucaptcha_key,
+    ai_key, rucaptcha_key,
     session_id, sem, max_retries=3,
     proxy: dict = None,
     queue_id: str = None,
+    ai_provider: str = "claude",
 ):
     current = asyncio.current_task()
     if current is not None:
@@ -1136,12 +1139,13 @@ async def _process_one(
                     url, phone,
                     firstname, lastname, patronymic,
                     email, comment,
-                    claude_key, rucaptcha_key,
+                    ai_key, rucaptcha_key,
                     attempt_no=attempt,
                     max_retries=max_retries,
                     prev_hint=prev_hint,
                     proxy=proxy,
                     session_id=session_id,
+                    ai_provider=ai_provider,
                 )
                 await db_add_result(
                     session_id, url, result,
@@ -1224,8 +1228,9 @@ async def _run_session_bg(
     sid, urls, phone,
     firstname, lastname, patronymic,
     email, comment,
-    claude_key, rucaptcha_key,
+    ai_key, rucaptcha_key,
     max_attempts,
+    ai_provider: str = "claude",
 ):
     await _ws_broadcast({
         "type": "start",
@@ -1239,8 +1244,9 @@ async def _run_session_bg(
             u.strip(), phone,
             firstname, lastname, patronymic,
             email, comment,
-            claude_key, rucaptcha_key,
+            ai_key, rucaptcha_key,
             sid, sem, max_attempts,
+            ai_provider=ai_provider,
         )
         for u in urls if u.strip()
     ]
@@ -1265,11 +1271,18 @@ async def run_session(
     rucaptcha_key: str = "",
     session_name: str = "",
     max_attempts: int = 3,
+    deepseek_key: str = "",
+    ai_provider: str = "claude",
 ):
     _cleanup_data_except_db()
     sid = str(uuid.uuid4())[:8]
     await db_create_session(
         sid, session_name or sid, len(urls),
+    )
+    ai_provider = (ai_provider or "claude").lower()
+    ai_key = (
+        deepseek_key if ai_provider == "deepseek"
+        else claude_key
     )
     _queue_cancel.clear()
     asyncio.create_task(
@@ -1277,8 +1290,9 @@ async def run_session(
             sid, urls, phone,
             firstname, lastname, patronymic,
             email, comment,
-            claude_key, rucaptcha_key,
+            ai_key, rucaptcha_key,
             max_attempts,
+            ai_provider=ai_provider,
         )
     )
     return sid
@@ -1289,8 +1303,9 @@ async def run_session(
 
 async def _run_client(
     queue_id: str, client: dict,
-    urls: list, claude_key: str,
+    urls: list, ai_key: str,
     rucaptcha_key: str, max_attempts: int,
+    ai_provider: str = "claude",
 ):
     sid = str(uuid.uuid4())[:8]
     client_id = client["id"]
@@ -1335,10 +1350,11 @@ async def _run_client(
             client.get("patronymic", ""),
             client.get("email", ""),
             client.get("comment", ""),
-            claude_key, rucaptcha_key,
+            ai_key, rucaptcha_key,
             sid, sem, max_attempts,
             proxy=proxy,
             queue_id=queue_id,
+            ai_provider=ai_provider,
         )
         for u in urls if u.strip()
     ]
@@ -1403,11 +1419,21 @@ async def _run_queue_bg(queue_id: str):
             )
 
             try:
+                q_provider = (
+                    queue.get("ai_provider")
+                    or "claude"
+                ).lower()
+                q_ai_key = (
+                    queue.get("deepseek_key", "")
+                    if q_provider == "deepseek"
+                    else queue.get("claude_key", "")
+                )
                 await _run_client(
                     queue_id, client, urls,
-                    queue["claude_key"],
+                    q_ai_key,
                     queue["rucaptcha_key"],
                     queue["max_attempts"],
+                    ai_provider=q_provider,
                 )
             except asyncio.CancelledError:
                 break
@@ -1440,6 +1466,8 @@ async def run_queue(
     rucaptcha_key: str = "",
     queue_name: str = "",
     max_attempts: int = 3,
+    deepseek_key: str = "",
+    ai_provider: str = "claude",
 ) -> str:
     global _active_queue_id
     global _active_queue_task
@@ -1449,11 +1477,14 @@ async def run_queue(
     _cleanup_data_except_db()
 
     qid = str(uuid.uuid4())[:8]
+    ai_provider = (ai_provider or "claude").lower()
 
     await db_create_queue(
         qid, queue_name or qid, urls,
         claude_key, rucaptcha_key,
         max_attempts, len(clients),
+        deepseek_key=deepseek_key,
+        ai_provider=ai_provider,
     )
 
     for i, c in enumerate(clients):

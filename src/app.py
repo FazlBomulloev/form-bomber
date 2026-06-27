@@ -90,6 +90,8 @@ class StartRequest(BaseModel):
     email: str = ""
     comment: str = ""
     claude_key: str = ""
+    deepseek_key: str = ""
+    ai_provider: str = "claude"
     rucaptcha_key: str = ""
     session_name: str = "Проверка"
     max_attempts: int = 3
@@ -109,6 +111,8 @@ class StartQueueRequest(BaseModel):
     urls: list[str]
     clients: list[ClientData]
     claude_key: str = ""
+    deepseek_key: str = ""
+    ai_provider: str = "claude"
     rucaptcha_key: str = ""
     queue_name: str = "Проверка"
     max_attempts: int = 3
@@ -150,6 +154,8 @@ async def api_start(req: StartRequest):
         req.rucaptcha_key,
         req.session_name,
         max_attempts=req.max_attempts,
+        deepseek_key=req.deepseek_key,
+        ai_provider=req.ai_provider,
     )
     return {
         "session_id": sid,
@@ -213,6 +219,8 @@ async def api_queue_start(req: StartQueueRequest):
             [c.model_dump() for c in req.clients],
             req.claude_key, req.rucaptcha_key,
             req.queue_name, req.max_attempts,
+            deepseek_key=req.deepseek_key,
+            ai_provider=req.ai_provider,
         )
     except ValueError as e:
         return {"error": str(e)}

@@ -765,6 +765,7 @@
     </svg>
     <h1>AI Form Checker</h1>
     <span class="ai-badge">Claude</span>
+    <span class="ai-badge" style="background:linear-gradient(90deg,#06b6d4,#3b82f6);margin-left:3px">DeepSeek</span>
     <span class="ai-badge" style="background:linear-gradient(90deg,#7c3aed,#a78bfa);margin-left:3px">+ Vision</span>
     <button onclick="logout()" class="btn btn-ghost btn-sm" style="margin-left:8px;font-size:11px">Выйти</button>
   </div>
@@ -815,8 +816,21 @@
         <div class="divider"></div>
 
         <div>
+          <label>AI-провайдер</label>
+          <select id="aiProvider" onchange="onProviderChange()">
+            <option value="claude">Claude</option>
+            <option value="deepseek">DeepSeek</option>
+          </select>
+        </div>
+
+        <div id="claudeKeyWrap">
           <label>Claude API ключ <span style="color:var(--muted);font-size:10px">(необязательно)</span></label>
           <input type="password" id="claudeKey" placeholder="sk-ant-... (optional)">
+        </div>
+
+        <div id="deepseekKeyWrap" style="display:none">
+          <label>DeepSeek API ключ <span style="color:var(--muted);font-size:10px">(необязательно)</span></label>
+          <input type="password" id="deepseekKey" placeholder="sk-... (optional)">
         </div>
 
         <div>
@@ -985,6 +999,13 @@
       if (id === 'tab-history') loadHistory();
     }
 
+    // ── AI provider switch ──
+    function onProviderChange() {
+      const p = document.getElementById('aiProvider').value;
+      document.getElementById('claudeKeyWrap').style.display = (p === 'claude') ? '' : 'none';
+      document.getElementById('deepseekKeyWrap').style.display = (p === 'deepseek') ? '' : 'none';
+    }
+
     // ── URL counter ──
     function countUrls() {
       const n = document.getElementById('urlsInput').value.split('\n').filter(l => l.trim()).length;
@@ -1065,7 +1086,9 @@
         queue_name: document.getElementById('sessionName').value.trim() || 'Проверка',
         urls,
         clients: clientsList,
+        ai_provider: document.getElementById('aiProvider').value,
         claude_key: document.getElementById('claudeKey').value.trim(),
+        deepseek_key: document.getElementById('deepseekKey').value.trim(),
         rucaptcha_key: document.getElementById('rucaptchaKey').value.trim(),
         max_attempts: parseInt(document.getElementById('maxAttempts').value || '3', 10),
       };

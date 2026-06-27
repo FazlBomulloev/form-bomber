@@ -106,6 +106,16 @@ async def db_init():
                 )
             except Exception:
                 pass
+        for col, default in [
+            ("deepseek_key", "TEXT DEFAULT ''"),
+            ("ai_provider", "TEXT DEFAULT 'claude'"),
+        ]:
+            try:
+                await db.execute(
+                    f"ALTER TABLE queue ADD COLUMN {col} {default}"
+                )
+            except Exception:
+                pass
         await db.commit()
 
 
@@ -208,17 +218,21 @@ async def db_create_queue(
     qid: str, name: str, urls: list,
     claude_key: str, rucaptcha_key: str,
     max_attempts: int, total_clients: int,
+    deepseek_key: str = "",
+    ai_provider: str = "claude",
 ):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO queue"
-            "(id,name,urls,claude_key,rucaptcha_key,"
+            "(id,name,urls,claude_key,deepseek_key,"
+            "ai_provider,rucaptcha_key,"
             "max_attempts,total_clients) "
-            "VALUES(?,?,?,?,?,?,?)",
+            "VALUES(?,?,?,?,?,?,?,?,?)",
             (
                 qid, name,
                 json.dumps(urls, ensure_ascii=False),
-                claude_key, rucaptcha_key,
+                claude_key, deepseek_key, ai_provider,
+                rucaptcha_key,
                 max_attempts, total_clients,
             ),
         )

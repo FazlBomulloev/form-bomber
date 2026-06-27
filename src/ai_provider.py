@@ -1,4 +1,4 @@
-"""AI-провайдер: только Claude.
+"""AI-провайдер: Claude и DeepSeek.
 Включает очистку HTML и сбор iframe-контента."""
 
 import json
@@ -8,6 +8,11 @@ import requests as _requests
 
 CLAUDE_URL = "https://api.oneprovider.dev/v1/messages"
 CLAUDE_MODEL = "claude-sonnet-4-6"
+
+DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_MODEL = "deepseek-v4-flash"
+
+AI_PROVIDERS = ("claude", "deepseek")
 
 _SYSTEM = "Верни ТОЛЬКО JSON. Без markdown и текста."
 
@@ -193,7 +198,7 @@ def _expand_ai_response(short: dict) -> dict:
 
 
 class AIParseError(ValueError):
-    """JSON-ответ Claude не распарсился. raw_text — что
+    """JSON-ответ AI не распарсился. raw_text — что
     реально вернул провайдер (для разборов)."""
 
     def __init__(self, message: str, raw_text: str = ""):
@@ -202,12 +207,12 @@ class AIParseError(ValueError):
 
 
 def _parse(content):
-    """Достаёт первый JSON-объект из ответа Claude.
+    """Достаёт первый JSON-объект из ответа AI.
     Терпит markdown-обёртку, лишний текст до/после
     JSON, SSE-префиксы прокси."""
     if not content or not content.strip():
         raise AIParseError(
-            "пустой ответ Claude",
+            "пустой ответ AI",
             raw_text=content or "",
         )
     s = content.strip()
@@ -278,19 +283,32 @@ def _claude_call(prompt, system, api_key):
     return resp.json()
 
 
-def ask_ai_sync(page_html, url, claude_key):
-    """Принимает сырой HTML, чистит, отправляет в Claude.
-    Возвращает (result_dict, tokens, provider).
-    При ошибке парсинга кидает AIParseError с raw_text."""
-    cleaned = clean_html(page_html)
-    prompt = _PROMPT.replace("%%HTML%%", cleaned)
-
-    if not claude_key:
-        raise RuntimeError("Claude API ключ не указан")
-
-    data = _retry(
-        _claude_call, prompt, _SYSTEM, claude_key,
+def _deepseek_call(prompt, system, api_key):
+    sess = _requests.Session()
+    sess.headers["Connection"] = "close"
+    resp = sess.post(
+        DEEPSEEK_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": DEEPSEEK_MODEL,
+            "max_tokens": 600,
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+        },
+        timeout=90,
     )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _extract_claude(data):
     content = ""
     for block in data.get("content", []):
         if block.get("type") == "text":
@@ -301,12 +319,57 @@ def ask_ai_sync(page_html, url, claude_key):
         usage.get("input_tokens", 0)
         + usage.get("output_tokens", 0)
     )
+    return content, tokens
+
+
+def _extract_deepseek(data):
+    choices = data.get("choices") or []
+    content = ""
+    if choices:
+        msg = choices[0].get("message") or {}
+        content = (msg.get("content") or "").strip()
+    usage = data.get("usage", {})
+    tokens = (
+        usage.get("prompt_tokens", 0)
+        + usage.get("completion_tokens", 0)
+    )
+    return content, tokens
+
+
+def ask_ai_sync(page_html, url, api_key, provider="claude"):
+    """Принимает сырой HTML, чистит, отправляет в выбранный AI.
+    Возвращает (result_dict, tokens, provider).
+    При ошибке парсинга кидает AIParseError с raw_text."""
+    cleaned = clean_html(page_html)
+    prompt = _PROMPT.replace("%%HTML%%", cleaned)
+
+    provider = (provider or "claude").lower()
+    if provider not in AI_PROVIDERS:
+        raise RuntimeError(
+            f"Неизвестный AI-провайдер: {provider}"
+        )
+    if not api_key:
+        raise RuntimeError(
+            f"{provider} API ключ не указан"
+        )
+
+    if provider == "deepseek":
+        data = _retry(
+            _deepseek_call, prompt, _SYSTEM, api_key,
+        )
+        content, tokens = _extract_deepseek(data)
+    else:
+        data = _retry(
+            _claude_call, prompt, _SYSTEM, api_key,
+        )
+        content, tokens = _extract_claude(data)
+
     try:
         parsed = _parse(content)
     except AIParseError as e:
         e.tokens = tokens
         raise
-    return parsed, tokens, "claude"
+    return parsed, tokens, provider
 
 
 async def collect_full_html(page):
