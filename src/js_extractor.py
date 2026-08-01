@@ -183,12 +183,18 @@ FORM_EXTRACTOR_JS = r"""() => {
         ],
     };
 
-    // autocomplete → role (точные значения Chromium spec)
+    // autocomplete → role (точные значения WHATWG/Chromium spec).
+    // Firefox/Chrome Autofill считают autocomplete главным сигналом —
+    // он «trumps» любую эвристику по name/id/placeholder.
     const AC_MAP = {
         'tel': 'phone',
         'tel-national': 'phone',
         'tel-local': 'phone',
+        'tel-area-code': 'phone',
+        'tel-country-code': 'phone',
+        'tel-extension': 'phone',
         'mobile tel': 'phone',
+        'mobile': 'phone',
         'email': 'email',
         'given-name': 'firstname',
         'family-name': 'lastname',
@@ -196,10 +202,56 @@ FORM_EXTRACTOR_JS = r"""() => {
         'name': 'name',
         'cc-name': 'name',
         'organization': 'company',
+        'organization-title': 'company',
         'street-address': 'address',
         'address-line1': 'address',
+        'address-line2': 'address',
+        'address-level1': 'address',
+        'address-level2': 'address',
+        'postal-code': 'address',
+        'country': 'address',
+        'country-name': 'address',
         'bday': 'date',
+        'bday-day': 'date',
     };
+
+    // Разбор autocomplete: значение может нести секцию/режим
+    // (напр. «shipping tel», «section-a billing given-name»).
+    // Берём полную строку, затем последний токен.
+    function acToRole(ac) {
+        if (!ac) return null;
+        ac = ac.trim().toLowerCase();
+        if (!ac || ac === 'on' || ac === 'off' || ac === 'nope')
+            return null;
+        if (AC_MAP[ac]) return AC_MAP[ac];
+        const toks = ac.split(/\s+/).filter(Boolean);
+        if (toks.length) {
+            const last = toks[toks.length - 1];
+            if (AC_MAP[last]) return AC_MAP[last];
+        }
+        return null;
+    }
+
+    // n-gram / подстрочный фолбэк: когда строгий regex не дал роль,
+    // ловим слипшиеся/сокращённые атрибуты (clientname, usrtel2,
+    // phonenum, fam_klienta). Логин-стемы (user/login/nick/pass)
+    // исключаем, чтобы «name» не ловил username/nickname.
+    function ngramFallback(bag) {
+        if (!bag) return null;
+        bag = bag.toLowerCase();
+        const isLogin = /user|login|nick|pass|логин|псевдоним/.test(bag);
+        if (/mail|почт|email/.test(bag)) return 'email';
+        if (/тел|phon|\btel|mobil|\bмоб|gsm|whats|viber/.test(bag))
+            return 'phone';
+        // фамилия — до общего name (иначе «nam» перехватит)
+        if (/fam|фами|surname|lastname/.test(bag)) return 'lastname';
+        if (/first.?name|given.?name|\bимя\b|имен/.test(bag))
+            return 'firstname';
+        if (!isLogin
+            && /fio|фио|nam|klient|client|zovut|зовут/.test(bag))
+            return 'name';
+        return null;
+    }
 
     function scoreRole(el, signals) {
         const scores = {};
@@ -249,6 +301,7 @@ FORM_EXTRACTOR_JS = r"""() => {
             ['name',        signals.name,        W.name],
             ['label',       signals.label,       W.label],
             ['aria',        signals.aria,        W.aria],
+            ['title',       signals.title,       W.aria],
             ['placeholder', signals.ph,          W.placeholder],
             ['class',       signals.cls,         W.class],
             ['id',          signals.id,          W.id],
@@ -298,6 +351,8 @@ FORM_EXTRACTOR_JS = r"""() => {
             label:   getLabel(el).toLowerCase(),
             aria:    (el.getAttribute('aria-label')||'')
                         .toLowerCase(),
+            title:   (el.getAttribute('title')||'')
+                        .toLowerCase(),
             df:      (el.getAttribute('data-field')||'')
                         .toLowerCase(),
             dn:      (el.getAttribute('data-name')||'')
@@ -342,6 +397,24 @@ FORM_EXTRACTOR_JS = r"""() => {
             };
         }
 
+        // 0. autocomplete «trumps» эвристику (Firefox/Chrome Autofill):
+        // при известном autocomplete-значении роль ставим ПО НЕМУ,
+        // ДО regex по name/id/placeholder.
+        const acRole = acToRole(signals.ac);
+        if (acRole) {
+            return {
+                role: acRole, confidence: 0.97,
+                alternatives: [], signals,
+            };
+        }
+
+        // Общая строка для n-gram-фолбэка (все текстовые источники).
+        const ngBag = [
+            signals.name, signals.id, signals.cls,
+            signals.label, signals.aria, signals.title,
+            signals.ph, signals.df, signals.dn, signals.rule,
+        ].join(' ');
+
         // Scoring
         const scores = scoreRole(el, signals);
         const ranked = Object.entries(scores)
@@ -358,6 +431,11 @@ FORM_EXTRACTOR_JS = r"""() => {
             if (type === 'date') return {
                 role: 'date', confidence: 0.8,
                 alternatives: [], signals};
+            // строгий regex ничего не дал → n-gram-фолбэк
+            const ng = ngramFallback(ngBag);
+            if (ng) return {
+                role: ng, confidence: 0.55,
+                alternatives: [], signals};
             return {
                 role: 'text_unknown', confidence: 0.0,
                 alternatives: [], signals,
@@ -370,6 +448,16 @@ FORM_EXTRACTOR_JS = r"""() => {
             ([r, s]) => [r, Math.min(1, s / ROLE_NORM)]);
 
         if (confidence < ROLE_THRESHOLD) {
+            // строгий regex не набрал порог → пробуем n-gram-фолбэк
+            const ng = ngramFallback(ngBag);
+            if (ng) {
+                return {
+                    role: ng, confidence: Math.max(0.55, confidence),
+                    alternatives: [[topRole, confidence],
+                        ...alternatives],
+                    signals,
+                };
+            }
             return {
                 role: 'text_unknown',
                 confidence: confidence,

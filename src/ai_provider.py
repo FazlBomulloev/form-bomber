@@ -34,9 +34,24 @@ CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 DEEPSEEK_URL = os.getenv(
     "DEEPSEEK_URL", "https://api.deepseek.com/chat/completions")
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+# deepseek-v4-pro — сильнейшая модель DeepSeek (точнее flash на
+# разборе форм). Можно понизить до deepseek-v4-flash через .env
+# ради скорости/цены.
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
 
-AI_PROVIDERS = ("claude", "deepseek")
+# Провайдер по умолчанию (Claude отдаёт 403 на текущем прокси —
+# основной рабочий провайдер DeepSeek). Меняется через .env.
+DEFAULT_PROVIDER = os.getenv("AI_PROVIDER", "deepseek").lower()
+
+AI_PROVIDERS = ("deepseek", "claude")
+
+# Провайдеры с поддержкой vision (картинка в промпте). DeepSeek V4 —
+# текстовая модель, поэтому скриншот ей не отправляется.
+_VISION_PROVIDERS = {"claude"}
+
+
+def is_vision_provider(provider: str) -> bool:
+    return (provider or "").lower() in _VISION_PROVIDERS
 
 
 def _env_key(provider: str) -> str:
@@ -50,32 +65,59 @@ def _env_key(provider: str) -> str:
         return os.getenv("DEEPSEEK_API_KEY", "")
     return ""
 
-_SYSTEM = "Верни ТОЛЬКО JSON. Без markdown и текста."
+_SYSTEM = (
+    "Ты — эксперт по HTML-формам. Твоя задача — найти на странице "
+    "форму заявки/обратной связи и составить пошаговый план её "
+    "заполнения. Отвечай СТРОГО одним JSON-объектом, без markdown, "
+    "без пояснений и текста вокруг."
+)
 
 _PROMPT = """\
-Найди контактную форму на странице (обратный звонок, запись, \
-консультация, заявка) и составь план заполнения.
+На странице российской компании (часто клиника/услуги) нужно \
+оставить заявку. Найди ПРАВИЛЬНУЮ форму и опиши, как её заполнить.
 
-JSON формат:
-{"f":true,"fs":"CSS селектор формы","a":[
+КАКУЮ форму выбирать:
+- ДА: «обратный звонок», «запись на приём», «оставить заявку», \
+«консультация», «перезвоните мне», «задать вопрос». Признаки: есть \
+поле телефона; кнопка вида «Записаться / Заказать звонок / Отправить».
+- НЕТ (не выбирай): поиск по сайту, форма входа/логина (есть пароль), \
+подписка на рассылку (только e-mail + «Подписаться»), фильтры, \
+калькуляторы. Если на странице только такие — верни {"f":false}.
+
+Формат ответа (compact JSON, ключи сокращённые):
+{"f":true,"fs":"CSS-селектор <form>","a":[
 {"s":1,"a":"fill","f":"phone","sel":"CSS","v":"{phone}"},
 {"s":2,"a":"fill","f":"name","sel":"CSS","v":"{name}"},
 {"s":3,"a":"click","f":"checkbox","sel":"CSS"},
 {"s":4,"a":"submit","f":"submit","sel":"CSS"}],
 "cap":false,"ct":null}
 
-Правила:
-- f=true если форма найдена, false если нет
-- a=actions: s=шаг, a=действие (fill|click|select_first|submit), \
-f=поле, sel=CSS selector, v=значение
-- Значения v: {phone},{name},{firstname},{lastname},{patronymic},\
-{email},{comment},{date}
-- submit ВСЕГДА последний шаг
-- select_first для <select>
-- cap/ct: капча recaptcha|hcaptcha|turnstile|smartcaptcha
-- Нет телефона → f:false
+Что означают поля JSON:
+- f: true — форма заявки найдена; false — подходящей формы нет.
+- fs: CSS-селектор самого элемента <form> (или контейнера формы).
+- a: список действий по порядку (s — номер шага):
+  - a="fill" — ввести значение v в поле sel;
+  - a="click" — кликнуть (обычно чекбокс согласия);
+  - a="select_first" — выбрать первый непустой пункт в <select>;
+  - a="submit" — отправить форму (ВСЕГДА последний шаг).
+- v: подставляемое значение-плейсхолдер (движок сам заменит):
+  {phone},{name},{firstname},{lastname},{patronymic},{email},\
+{comment},{date}.
+- cap: true, если форму защищает капча; ct — её тип \
+(recaptcha|hcaptcha|turnstile|smartcaptcha), иначе null.
 
-HTML:
+ВАЖНЫЕ правила:
+1. Телефон — обязательное поле. Если поля телефона в форме нет — \
+скорее всего это не форма заявки: верни {"f":false}.
+2. Заполни ВСЕ обязательные поля (помечены required/*): имя, \
+телефон, при наличии — e-mail, город/услуга (select_first), дата.
+3. Если есть чекбокс согласия на обработку данных — обязательно \
+добавь шаг click по нему ПЕРЕД submit.
+4. Давай МАКСИМАЛЬНО точные и уникальные CSS-селекторы (по id/name/\
+type/placeholder), чтобы они однозначно попадали в нужный элемент.
+5. Ровно один submit, и он всегда последним шагом.
+
+HTML страницы:
 %%HTML%%"""
 
 
@@ -293,7 +335,23 @@ def _retry(fn, *args, retries=3, delay=4):
     raise last
 
 
-def _claude_call(prompt, system, api_key):
+def _claude_call(prompt, system, api_key, screenshot_b64=None):
+    # content: строка, либо (при наличии скриншота) список блоков
+    # text + image — Claude умеет vision.
+    if screenshot_b64:
+        user_content = [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": screenshot_b64,
+                },
+            },
+        ]
+    else:
+        user_content = prompt
     sess = _requests.Session()
     sess.headers["Connection"] = "close"
     resp = sess.post(
@@ -310,7 +368,7 @@ def _claude_call(prompt, system, api_key):
             "system": system,
             "messages": [
                 {"role": "user",
-                 "content": prompt},
+                 "content": user_content},
             ],
         },
         timeout=90,
@@ -372,15 +430,18 @@ def _extract_deepseek(data):
     return content, tokens
 
 
-def _dispatch(provider, prompt, api_key):
-    """Один вызов конкретного провайдера → (content, tokens)."""
+def _dispatch(provider, prompt, api_key, screenshot_b64=None):
+    """Один вызов конкретного провайдера → (content, tokens).
+    screenshot_b64 передаётся только vision-провайдерам (DeepSeek —
+    текстовая модель, скриншот игнорируется)."""
     if provider == "deepseek":
         data = _retry(
             _deepseek_call, prompt, _SYSTEM, api_key,
         )
         return _extract_deepseek(data)
+    shot = screenshot_b64 if is_vision_provider(provider) else None
     data = _retry(
-        _claude_call, prompt, _SYSTEM, api_key,
+        _claude_call, prompt, _SYSTEM, api_key, shot,
     )
     return _extract_claude(data)
 
@@ -396,7 +457,8 @@ def _log_warn(msg, **kw):
         pass
 
 
-def ask_ai_sync(page_html, url, api_key, provider="claude"):
+def ask_ai_sync(page_html, url, api_key, provider=None,
+                screenshot_b64=None):
     """Принимает сырой HTML, чистит, отправляет в выбранный AI.
     Возвращает (result_dict, tokens, provider).
 
@@ -409,7 +471,7 @@ def ask_ai_sync(page_html, url, api_key, provider="claude"):
     cleaned = clean_html(page_html)
     prompt = _PROMPT.replace("%%HTML%%", cleaned)
 
-    provider = (provider or "claude").lower()
+    provider = (provider or DEFAULT_PROVIDER).lower()
     if provider not in AI_PROVIDERS:
         raise RuntimeError(
             f"Неизвестный AI-провайдер: {provider}"
@@ -439,7 +501,9 @@ def ask_ai_sync(page_html, url, api_key, provider="claude"):
 
         tried_any = True
         try:
-            content, tokens = _dispatch(prov, prompt, key)
+            content, tokens = _dispatch(
+                prov, prompt, key, screenshot_b64,
+            )
             total_tokens += tokens
         except Exception as e:
             total_tokens += getattr(e, "tokens", 0)

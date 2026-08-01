@@ -1232,6 +1232,96 @@ async def _prefill_date_fields(
         return 0
 
 
+async def collect_form_fields(page, form_el=None):
+    """Сериализует ВСЕ поля формы в dict name→value —
+    как это делает браузер при штатном submit.
+
+    Собирает hidden/_token/csrf/nonce, текстовые input'ы,
+    выбранные option'ы select, отмеченные radio/checkbox.
+    Нужно, чтобы прямой POST-фолбэк (или диагностика) нёс
+    все существующие поля, а не только phone+name — иначе
+    Laravel/Django/Bitrix молча отбрасывают заявку без
+    токена. Возвращает
+    {"fields": {...}, "hidden": {...}, "has_csrf": bool}.
+    """
+    log = get_logger()
+    try:
+        data = await page.evaluate(r"""root => {
+            const form = root
+                || document.querySelector('form')
+                || document;
+            const fields = {};
+            const hidden = {};
+            const els = form.querySelectorAll(
+                'input, select, textarea');
+            for (const el of els) {
+                const name = el.name;
+                if (!name) continue;
+                if (el.disabled) continue;
+                const tag = el.tagName.toLowerCase();
+                const tp = (el.type || '').toLowerCase();
+                if (tag === 'input'
+                    && (tp === 'checkbox'
+                        || tp === 'radio')) {
+                    if (!el.checked) continue;
+                    fields[name] = el.value || 'on';
+                    continue;
+                }
+                if (tag === 'select') {
+                    if (el.multiple) {
+                        const vals = Array.from(
+                            el.selectedOptions)
+                            .map(o => o.value);
+                        if (vals.length)
+                            fields[name] = vals.join(',');
+                    } else if (el.value) {
+                        fields[name] = el.value;
+                    }
+                    continue;
+                }
+                if (tp === 'submit' || tp === 'button'
+                    || tp === 'file' || tp === 'image')
+                    continue;
+                const val = el.value || '';
+                fields[name] = val;
+                if (tp === 'hidden')
+                    hidden[name] = val;
+            }
+            return {fields, hidden};
+        }""", form_el)
+    except Exception:
+        return {"fields": {}, "hidden": {}, "has_csrf": False}
+
+    fields = (data or {}).get("fields", {}) or {}
+    hidden = (data or {}).get("hidden", {}) or {}
+    csrf_re = re.compile(
+        r"csrf|_?token|nonce|authenticity", re.I
+    )
+    csrf_names = [
+        n for n in hidden if csrf_re.search(n)
+    ]
+    has_csrf = bool(csrf_names)
+    if log:
+        if has_csrf:
+            log.step(
+                "form_fields",
+                f"hidden={len(hidden)}, "
+                f"csrf/token поля: "
+                f"{', '.join(csrf_names)}",
+            )
+        elif hidden:
+            log.step(
+                "form_fields",
+                f"hidden={len(hidden)} "
+                "(csrf/token не найден)",
+            )
+    return {
+        "fields": fields,
+        "hidden": hidden,
+        "has_csrf": has_csrf,
+    }
+
+
 async def _looks_like_phone_field(page, el) -> bool:
     """Защита от случая, когда AI/эвристика подсунула
     под `phone` нерелевантное поле (выбор клиники,
@@ -1634,6 +1724,14 @@ async def execute_action_plan(
 async def do_submit(page, submit_sel, form_el=None):
     log = get_logger()
     if form_el:
+        # Диагностика: при штатном submit (клик/
+        # requestSubmit по реальной <form>) hidden/CSRF
+        # уходят автоматически. Логируем их наличие, чтобы
+        # видеть сайты, где токен критичен.
+        try:
+            await collect_form_fields(page, form_el)
+        except Exception:
+            pass
         try:
             action = await page.evaluate(
                 "f => (f.action || '').toLowerCase()",
@@ -1907,8 +2005,11 @@ async def fill_all_empty_fields(
                     nm+' '+ph))
                     role = 'comment';
                 else if (tp==='date'
+                    || tp==='datetime-local'
                     || /дата|date/.test(nm+' '+ph))
                     role = 'date';
+                else if (tp==='number')
+                    role = 'number';
                 else if (tag === 'select')
                     role = 'dropdown';
                 else if (tag === 'textarea')
@@ -1983,6 +2084,15 @@ async def fill_all_empty_fields(
                 )
                 if ok:
                     fixed += 1
+            elif role == "number":
+                # input[type=number]: заполняем разумным
+                # числовым дефолтом (кол-во гостей/мест
+                # и т.п.), учитывая min если задан.
+                ok = await _fill_number_default(
+                    page, sel,
+                )
+                if ok:
+                    fixed += 1
             elif role == "dropdown":
                 ok = await _select_first(page, sel)
                 if ok:
@@ -1996,11 +2106,122 @@ async def fill_all_empty_fields(
                     fixed += 1
         except Exception:
             continue
+
+    # Radio-группы без выбранного варианта → первый
+    # видимый (не honeypot/disabled). Составные поля вроде
+    # «как связаться»/«способ доставки» часто обязательны.
+    try:
+        radio_fixed = await _select_empty_radio_groups(
+            page, form_el, honeypot_set,
+        )
+        fixed += radio_fixed
+    except Exception:
+        pass
+
     if log and fixed:
         log.ok(
             f"дозаполнено {fixed} пустых полей (все)"
         )
     return fixed
+
+
+async def _fill_number_default(page, sel):
+    """Заполняет пустой input[type=number] дефолтом.
+    Уважает min (если задан), иначе ставит 2."""
+    el = await find_el(page, sel)
+    if not el:
+        return False
+    try:
+        return bool(await page.evaluate(r"""el => {
+            if (!el || el.tagName !== 'INPUT')
+                return false;
+            if ((el.value || '').trim()) return false;
+            let v = 2;
+            const mn = parseFloat(el.min);
+            if (!isNaN(mn)) v = mn > 0 ? mn : (mn === 0 ? 1 : v);
+            const mx = parseFloat(el.max);
+            if (!isNaN(mx) && v > mx) v = mx;
+            const proto = HTMLInputElement.prototype;
+            const desc = Object.getOwnPropertyDescriptor(
+                proto, 'value');
+            const val = String(v);
+            if (desc && desc.set) desc.set.call(el, val);
+            else el.value = val;
+            el.dispatchEvent(
+                new Event('input', {bubbles: true}));
+            el.dispatchEvent(
+                new Event('change', {bubbles: true}));
+            return true;
+        }""", el))
+    except Exception:
+        return False
+
+
+async def _select_empty_radio_groups(
+    page, form_el=None, honeypots=None,
+):
+    """Для каждой radio-группы (общий name), где ничего не
+    выбрано, отмечает первый видимый, не disabled и не
+    honeypot вариант. Возвращает число исправленных групп."""
+    honeypot_list = list(honeypots or [])
+    try:
+        return int(await page.evaluate(r"""(args) => {
+            const scope = args.form || document;
+            const skip = new Set(args.honeypots || []);
+            const isShown = (el) => {
+                try {
+                    const st = getComputedStyle(el);
+                    if (st.display === 'none'
+                        || st.visibility === 'hidden')
+                        return false;
+                    const r = el.getBoundingClientRect();
+                    if (r.left < -1000 || r.top < -1000)
+                        return false;
+                    return true;
+                } catch(e) { return false; }
+            };
+            const selOf = (el) => {
+                if (el.id) return '#' + el.id;
+                if (el.name) return 'input[name="'
+                    + el.name + '"]';
+                return null;
+            };
+            const groups = {};
+            const radios = scope.querySelectorAll(
+                'input[type="radio"]');
+            for (const el of radios) {
+                const nm = el.name;
+                if (!nm) continue;
+                (groups[nm] = groups[nm] || []).push(el);
+            }
+            let n = 0;
+            for (const nm in groups) {
+                const list = groups[nm];
+                if (list.some(r => r.checked)) continue;
+                let chosen = null;
+                for (const r of list) {
+                    if (r.disabled) continue;
+                    if (!isShown(r)) continue;
+                    const s = selOf(r);
+                    if (s && skip.has(s)) continue;
+                    chosen = r;
+                    break;
+                }
+                if (!chosen) continue;
+                chosen.checked = true;
+                chosen.dispatchEvent(
+                    new Event('input', {bubbles: true}));
+                chosen.dispatchEvent(
+                    new Event('change', {bubbles: true}));
+                n++;
+            }
+            return n;
+        }""", {
+            "form": form_el,
+            "honeypots": honeypot_list,
+        }))
+    except Exception:
+        return 0
 
 
 async def _fix_invalid_fields(

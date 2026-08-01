@@ -7,6 +7,30 @@ _LOAD_URL = "https://mod.calltouch.ru/callback_load.php"
 _CALL_URL = "https://mod.calltouch.ru/callback_call.php"
 
 
+async def _collect_hidden_fields(page):
+    """Считывает все hidden-поля форм страницы (name→value)
+    для прямого POST-фолбэка. Возвращает
+    (hidden_dict, csrf_names). Так прямой POST несёт
+    существующие _token/csrf/nonce, а не только phone."""
+    try:
+        return await page.evaluate(r"""() => {
+            const hidden = {};
+            const els = document.querySelectorAll(
+                'input[type="hidden"]');
+            for (const el of els) {
+                if (!el.name) continue;
+                if (el.disabled) continue;
+                hidden[el.name] = el.value || '';
+            }
+            const re = /csrf|_?token|nonce|authenticity/i;
+            const csrf = Object.keys(hidden)
+                .filter(n => re.test(n));
+            return {hidden, csrf};
+        }""")
+    except Exception:
+        return {"hidden": {}, "csrf": []}
+
+
 async def _get_calltouch_cookies(page):
     cookies = await page.context.cookies()
     session_id = None
@@ -38,6 +62,27 @@ async def try_calltouch(page, phone, name=""):
             "calltouch",
             f"site={site_id}, session={session_id[:8]}",
         )
+
+    # Собираем hidden/CSRF-поля исходной формы, чтобы
+    # прямой POST нёс все существующие поля (_token/csrf/
+    # nonce), а не только phone+name.
+    hidden_data = await _collect_hidden_fields(page)
+    hidden_fields = hidden_data.get("hidden", {}) or {}
+    csrf_names = hidden_data.get("csrf", []) or []
+    if log:
+        if csrf_names:
+            log.step(
+                "calltouch",
+                f"hidden={len(hidden_fields)}, "
+                f"csrf/token поля: "
+                f"{', '.join(csrf_names)}",
+            )
+        elif hidden_fields:
+            log.step(
+                "calltouch",
+                f"hidden={len(hidden_fields)} "
+                "(csrf/token не найден)",
+            )
 
     try:
         async with aiohttp.ClientSession(
@@ -71,19 +116,26 @@ async def try_calltouch(page, phone, name=""):
                     )
                 return None
 
+            call_payload = {
+                "siteId": site_id,
+                "widgetId": widget_id,
+                "sessionId": session_id,
+                "showId": show_id,
+                "phone": phone,
+                "name": name,
+                "unitId": unit_id,
+                "callbackPeriod": "now",
+                "personalDataAgreement": True,
+            }
+            # Добавляем существующие hidden/CSRF-поля формы,
+            # не перезатирая ключи Calltouch API.
+            for hk, hv in hidden_fields.items():
+                if hk not in call_payload:
+                    call_payload[hk] = hv
+
             async with s.post(
                 _CALL_URL,
-                json={
-                    "siteId": site_id,
-                    "widgetId": widget_id,
-                    "sessionId": session_id,
-                    "showId": show_id,
-                    "phone": phone,
-                    "name": name,
-                    "unitId": unit_id,
-                    "callbackPeriod": "now",
-                    "personalDataAgreement": True,
-                },
+                json=call_payload,
             ) as r2:
                 call_data = await r2.json(
                     content_type=None

@@ -818,17 +818,17 @@
         <div>
           <label>AI-провайдер</label>
           <select id="aiProvider" onchange="onProviderChange()">
+            <option value="deepseek" selected>DeepSeek</option>
             <option value="claude">Claude</option>
-            <option value="deepseek">DeepSeek</option>
           </select>
         </div>
 
-        <div id="claudeKeyWrap">
+        <div id="claudeKeyWrap" style="display:none">
           <label>Claude API ключ <span style="color:var(--muted);font-size:10px">(необязательно)</span></label>
           <input type="password" id="claudeKey" placeholder="sk-ant-... (optional)">
         </div>
 
-        <div id="deepseekKeyWrap" style="display:none">
+        <div id="deepseekKeyWrap">
           <label>DeepSeek API ключ <span style="color:var(--muted);font-size:10px">(необязательно)</span></label>
           <input type="password" id="deepseekKey" placeholder="sk-... (optional)">
         </div>

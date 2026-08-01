@@ -91,7 +91,7 @@ class StartRequest(BaseModel):
     comment: str = ""
     claude_key: str = ""
     deepseek_key: str = ""
-    ai_provider: str = "claude"
+    ai_provider: str = "deepseek"
     rucaptcha_key: str = ""
     session_name: str = "Проверка"
     max_attempts: int = 3
@@ -112,7 +112,7 @@ class StartQueueRequest(BaseModel):
     clients: list[ClientData]
     claude_key: str = ""
     deepseek_key: str = ""
-    ai_provider: str = "claude"
+    ai_provider: str = "deepseek"
     rucaptcha_key: str = ""
     queue_name: str = "Проверка"
     max_attempts: int = 3

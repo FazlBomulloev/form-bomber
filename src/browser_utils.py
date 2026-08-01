@@ -1,5 +1,164 @@
 import asyncio
+import random
+
 from config import COOKIE_BTN_TEXTS
+
+
+# Свежий десктопный Chrome UA (запасной, если не задан явно).
+STEALTH_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+# Init-script, маскирующий следы автоматизации. Применяется
+# на КОНТЕКСТ через context.add_init_script(STEALTH_JS) ДО
+# любой навигации — тогда патч действует на все страницы и
+# фреймы ещё до загрузки документа.
+STEALTH_JS = r"""() => {
+    // navigator.webdriver -> undefined
+    try {
+        Object.defineProperty(navigator, 'webdriver', {
+            get: () => undefined,
+            configurable: true,
+        });
+    } catch (e) {}
+
+    // Языки как у живого RU-браузера
+    try {
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['ru-RU', 'ru', 'en-US', 'en'],
+            configurable: true,
+        });
+    } catch (e) {}
+
+    // Консистентная платформа
+    try {
+        Object.defineProperty(navigator, 'platform', {
+            get: () => 'Win32',
+            configurable: true,
+        });
+    } catch (e) {}
+
+    // Разумные аппаратные характеристики
+    try {
+        Object.defineProperty(
+            navigator, 'hardwareConcurrency', {
+                get: () => 8,
+                configurable: true,
+            });
+    } catch (e) {}
+    try {
+        Object.defineProperty(navigator, 'deviceMemory', {
+            get: () => 8,
+            configurable: true,
+        });
+    } catch (e) {}
+
+    // Непустые plugins / mimeTypes
+    try {
+        const mkPlugin = (name, filename, desc) => ({
+            name: name,
+            filename: filename,
+            description: desc,
+            length: 1,
+        });
+        const plugins = [
+            mkPlugin(
+                'Chrome PDF Plugin',
+                'internal-pdf-viewer',
+                'Portable Document Format'),
+            mkPlugin(
+                'Chrome PDF Viewer',
+                'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+                ''),
+            mkPlugin(
+                'Native Client',
+                'internal-nacl-plugin',
+                ''),
+        ];
+        Object.defineProperty(navigator, 'plugins', {
+            get: () => plugins,
+            configurable: true,
+        });
+        const mimeTypes = [
+            {
+                type: 'application/pdf',
+                suffixes: 'pdf',
+                description: '',
+            },
+            {
+                type: 'application/x-google-chrome-pdf',
+                suffixes: 'pdf',
+                description: 'Portable Document Format',
+            },
+        ];
+        Object.defineProperty(navigator, 'mimeTypes', {
+            get: () => mimeTypes,
+            configurable: true,
+        });
+    } catch (e) {}
+
+    // window.chrome = { runtime: {} }
+    try {
+        if (!window.chrome) {
+            window.chrome = { runtime: {} };
+        } else if (!window.chrome.runtime) {
+            window.chrome.runtime = {};
+        }
+    } catch (e) {}
+
+    // permissions.query: notifications -> denied, без throw
+    try {
+        const perms = navigator.permissions;
+        const orig = perms && perms.query;
+        if (orig) {
+            perms.query = (params) => {
+                if (params &&
+                    params.name === 'notifications') {
+                    return Promise.resolve(
+                        { state: 'denied' });
+                }
+                return orig.call(perms, params);
+            };
+        }
+    } catch (e) {}
+}"""
+
+
+async def apply_stealth(context):
+    """Навесить STEALTH_JS на КОНТЕКСТ до навигации.
+
+    Вызывать сразу после browser.new_context(...) и ДО
+    ctx.new_page()/goto — тогда патч сработает на всех
+    страницах и фреймах контекста. Ошибки проглатываются,
+    чтобы не ломать рабочий поток.
+    """
+    try:
+        await context.add_init_script(STEALTH_JS)
+        return True
+    except Exception:
+        return False
+
+
+def build_stealth_context_kwargs(base=None):
+    """Дополнить kwargs для new_context реалистичными полями.
+
+    Аддитивно: НЕ перезаписывает уже переданные ключи
+    (user_agent, viewport, locale и т.п.). Только добавляет
+    недостающее — живой UA, ru-RU, Europe/Moscow и слегка
+    рандомизированный viewport.
+    """
+    kwargs = dict(base) if base else {}
+    kwargs.setdefault("user_agent", STEALTH_UA)
+    kwargs.setdefault("locale", "ru-RU")
+    kwargs.setdefault("timezone_id", "Europe/Moscow")
+    if "viewport" not in kwargs:
+        kwargs["viewport"] = {
+            "width": random.randint(1280, 1440),
+            "height": random.randint(720, 900),
+        }
+    return kwargs
 
 
 async def step_shot(

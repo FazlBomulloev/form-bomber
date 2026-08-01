@@ -27,7 +27,9 @@ from db import (
     db_increment_profile_fail,
     db_delete_form_profile,
 )
-from ai_provider import ask_ai_sync, collect_full_html
+from ai_provider import (
+    ask_ai_sync, collect_full_html, is_vision_provider,
+)
 from form_finder import extract_forms, build_smart_plan
 from form_filler import (
     execute_action_plan, submit_with_retry,
@@ -37,6 +39,7 @@ from captcha import handle_captcha, detect_captcha_overlay
 from browser_utils import (
     dismiss_cookie_banners, suppress_widgets,
     has_calltouch, step_shot,
+    apply_stealth, build_stealth_context_kwargs,
 )
 from calltouch import try_calltouch
 
@@ -535,7 +538,7 @@ async def check_site_v2(
     prev_hint: dict = None,
     proxy: dict = None,
     session_id: str = "",
-    ai_provider: str = "claude",
+    ai_provider: str = "deepseek",
 ):
     domain = domain_from_url(url)
     sid_log_dir = (
@@ -567,6 +570,9 @@ async def check_site_v2(
             "viewport": {"width": 1280, "height": 900},
             "ignore_https_errors": True,
         }
+        # stealth: locale/timezone/недостающие поля (не перетирает
+        # заданные user_agent/viewport)
+        ctx_kwargs = build_stealth_context_kwargs(ctx_kwargs)
         if proxy:
             ctx_kwargs["proxy"] = proxy
         for _br_try in range(2):
@@ -575,6 +581,8 @@ async def check_site_v2(
                 ctx = await browser.new_context(
                     **ctx_kwargs,
                 )
+                # антибот: navigator.webdriver и пр. — до навигации
+                await apply_stealth(ctx)
                 _active_contexts.add(ctx)
                 page = await ctx.new_page()
                 break
@@ -847,6 +855,20 @@ async def check_site_v2(
                 page_html = await collect_full_html(
                     page
                 )
+                # скриншот только для vision-провайдера
+                # (DeepSeek — текстовый, скриншот не шлём)
+                shot_b64 = None
+                if is_vision_provider(ai_provider):
+                    try:
+                        import base64
+                        raw = await page.screenshot(
+                            type="jpeg", quality=60,
+                        )
+                        shot_b64 = base64.b64encode(
+                            raw
+                        ).decode("ascii")
+                    except Exception:
+                        shot_b64 = None
                 async with _ai_sem:
                     try:
                         (
@@ -854,7 +876,7 @@ async def check_site_v2(
                         ) = await asyncio.to_thread(
                             ask_ai_sync,
                             page_html, url, ai_key,
-                            ai_provider,
+                            ai_provider, shot_b64,
                         )
                         tokens += ai_tokens
                         _logger.log_ai(
@@ -1111,7 +1133,7 @@ async def _process_one(
     session_id, sem, max_retries=3,
     proxy: dict = None,
     queue_id: str = None,
-    ai_provider: str = "claude",
+    ai_provider: str = "deepseek",
 ):
     current = asyncio.current_task()
     if current is not None:
@@ -1230,7 +1252,7 @@ async def _run_session_bg(
     email, comment,
     ai_key, rucaptcha_key,
     max_attempts,
-    ai_provider: str = "claude",
+    ai_provider: str = "deepseek",
 ):
     await _ws_broadcast({
         "type": "start",
@@ -1272,14 +1294,14 @@ async def run_session(
     session_name: str = "",
     max_attempts: int = 3,
     deepseek_key: str = "",
-    ai_provider: str = "claude",
+    ai_provider: str = "deepseek",
 ):
     _cleanup_data_except_db()
     sid = str(uuid.uuid4())[:8]
     await db_create_session(
         sid, session_name or sid, len(urls),
     )
-    ai_provider = (ai_provider or "claude").lower()
+    ai_provider = (ai_provider or "deepseek").lower()
     ai_key = (
         deepseek_key if ai_provider == "deepseek"
         else claude_key
@@ -1305,7 +1327,7 @@ async def _run_client(
     queue_id: str, client: dict,
     urls: list, ai_key: str,
     rucaptcha_key: str, max_attempts: int,
-    ai_provider: str = "claude",
+    ai_provider: str = "deepseek",
 ):
     sid = str(uuid.uuid4())[:8]
     client_id = client["id"]
@@ -1467,7 +1489,7 @@ async def run_queue(
     queue_name: str = "",
     max_attempts: int = 3,
     deepseek_key: str = "",
-    ai_provider: str = "claude",
+    ai_provider: str = "deepseek",
 ) -> str:
     global _active_queue_id
     global _active_queue_task
@@ -1477,7 +1499,7 @@ async def run_queue(
     _cleanup_data_except_db()
 
     qid = str(uuid.uuid4())[:8]
-    ai_provider = (ai_provider or "claude").lower()
+    ai_provider = (ai_provider or "deepseek").lower()
 
     await db_create_queue(
         qid, queue_name or qid, urls,
