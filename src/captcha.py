@@ -7,7 +7,6 @@ from logger import get_logger
 
 _TIMEOUT = aiohttp.ClientTimeout(total=30)
 
-
 async def _get_sitekey(page):
     try:
         return await page.evaluate(r"""() => {
@@ -161,12 +160,9 @@ async def _get_sitekey(page):
     except Exception:
         return None
 
-
 async def _solve_smartcaptcha_overlay(
     page, page_url, rucaptcha_key,
 ):
-    """Решает Yandex SmartCaptcha, перекрывающую
-    всю страницу (checkbox 'I'm not a robot')."""
     log = get_logger()
     if not rucaptcha_key:
         return None
@@ -279,8 +275,6 @@ async def _solve_smartcaptcha_overlay(
             }
         }""", token)
 
-        # Кликаем чекбокс через все фреймы
-        #   (включая вложенные)
         _SC_P = (
             "smartcaptcha", "captcha-cloud",
             "captcha-api", "captcha.yandex",
@@ -315,7 +309,6 @@ async def _solve_smartcaptcha_overlay(
             except Exception:
                 continue
 
-        # Удаляем overlay
         await page.evaluate(r"""() => {
             const ovs = document.querySelectorAll(
                 '[class*="captcha" i],'
@@ -352,10 +345,7 @@ async def _solve_smartcaptcha_overlay(
             )
         return None
 
-
 async def _detect_slider_captcha(page, rucaptcha_key):
-    """Детектирует и решает slider-капчи
-    (передвинуть ползунок)."""
     log = get_logger()
     if not rucaptcha_key:
         return None
@@ -444,7 +434,6 @@ async def _detect_slider_captcha(page, rucaptcha_key):
                 "slider_error", error=str(e)[:80],
             )
         return None
-
 
 async def _solve_captcha(
     captcha_type, sitekey, page_url, rucaptcha_key,
@@ -566,7 +555,6 @@ async def _solve_captcha(
                 )
             return None
     return None
-
 
 async def _inject_captcha_token(
     page, captcha_type, token,
@@ -736,7 +724,6 @@ async def _inject_captcha_token(
             )
         return False
 
-
 async def _detect_math_captcha(page):
     log = get_logger()
     try:
@@ -852,7 +839,6 @@ async def _detect_math_captcha(page):
         return None
     except Exception:
         return None
-
 
 async def _detect_image_captcha(page, rucaptcha_key):
     log = get_logger()
@@ -1086,7 +1072,6 @@ async def _detect_image_captcha(page, rucaptcha_key):
             )
         return None
 
-
 async def _detect_icon_captcha(page, rucaptcha_key):
     log = get_logger()
     if not rucaptcha_key:
@@ -1216,10 +1201,7 @@ async def _detect_icon_captcha(page, rucaptcha_key):
             )
         return None
 
-
 async def _try_click_smartcaptcha(page):
-    """Пробует кликнуть чекбокс SmartCaptcha
-    напрямую (iframe, вложенный iframe, или DOM)."""
     log = get_logger()
 
     _SC_PAT = (
@@ -1237,11 +1219,6 @@ async def _try_click_smartcaptcha(page):
         '.CheckboxCaptcha-Button'
     )
 
-    # 1. Обход ВСЕХ фреймов (включая вложенные)
-    #    через page.frames — решает проблему
-    #    Tilda SmartCaptcha с вложенными iframe.
-    #    Retry до 3 раз с паузой, т.к. iframe капчи
-    #    может ещё грузиться после submit.
     for attempt in range(3):
         if attempt > 0:
             await asyncio.sleep(2)
@@ -1301,7 +1278,6 @@ async def _try_click_smartcaptcha(page):
         if not sc_frame_found:
             break
 
-    # 2. Ищем по тексту в DOM
     try:
         clicked = await page.evaluate(r"""() => {
             const all = document.querySelectorAll(
@@ -1350,10 +1326,7 @@ async def _try_click_smartcaptcha(page):
 
     return False
 
-
 async def _extract_smartcaptcha_sitekey(page):
-    """Ищет sitekey SmartCaptcha в Tilda и
-    других CMS."""
     try:
         return await page.evaluate(r"""() => {
             // 1. iframe src
@@ -1475,8 +1448,6 @@ async def _extract_smartcaptcha_sitekey(page):
     except Exception:
         pass
 
-    # Fallback: ищем sitekey в URL вложенных фреймов
-    #   (page.frames обходит все уровни вложенности)
     import re as _re
     try:
         for frame in page.frames:
@@ -1497,10 +1468,6 @@ async def _extract_smartcaptcha_sitekey(page):
     except Exception:
         pass
 
-    # Fallback 2: Tilda captcha iframe
-    # (forms.tildaapi.com/procces/captcha/) —
-    # sitekey внутри DOM cross-origin iframe,
-    # но Playwright может обращаться к фреймам напрямую
     try:
         for frame in page.frames:
             if frame == page.main_frame:
@@ -1551,7 +1518,6 @@ async def _extract_smartcaptcha_sitekey(page):
                     return sk
             except Exception:
                 pass
-            # вложенные фреймы внутри tildaapi фрейма
             for sub in frame.child_frames:
                 sub_url = (sub.url or "").lower()
                 m = _re.search(
@@ -1577,13 +1543,9 @@ async def _extract_smartcaptcha_sitekey(page):
 
     return None
 
-
 async def _handle_tilda_needcaptcha(
     page, page_url, rucaptcha_key,
 ):
-    """Специальная обработка Tilda needcaptcha:
-    ждём popup SmartCaptcha, решаем, вызываем Tilda
-    re-submit."""
     log = get_logger()
 
     for wait in range(6):
@@ -1658,8 +1620,6 @@ async def _handle_tilda_needcaptcha(
         clicked = await _try_click_smartcaptcha(page)
         if clicked:
             await asyncio.sleep(3)
-            # Проверяем решена ли капча:
-            #   checkbox checked во вложенных фреймах
             sc_solved = False
             for fr in page.frames:
                 if fr == page.main_frame:
@@ -1711,13 +1671,10 @@ async def _handle_tilda_needcaptcha(
                     log.log_captcha(
                         "tilda_sc_click_passed",
                     )
-                # Tilda auto-resubmits after checkbox,
-                # then shows success, then may redirect
                 orig_base = page_url.split('#')[0] \
                     .split('?')[0].rstrip('/')
                 for _aw in range(3):
                     await asyncio.sleep(2)
-                    # Check 1: page redirected
                     try:
                         cur = page.url.split('#')[0] \
                             .split('?')[0].rstrip('/')
@@ -1730,7 +1687,6 @@ async def _handle_tilda_needcaptcha(
                             return "tilda_auto_submitted"
                     except Exception:
                         return "tilda_auto_submitted"
-                    # Check 2: Tilda success box visible
                     try:
                         has_suc = await page.evaluate(
                             r"""() => {
@@ -1766,7 +1722,6 @@ async def _handle_tilda_needcaptcha(
                             return "tilda_auto_submitted"
                     except Exception:
                         return "tilda_auto_submitted"
-                    # Check 3: XHR has OK response
                     try:
                         auto_ok = await page.evaluate(
                             r"""() => {
@@ -1794,7 +1749,6 @@ async def _handle_tilda_needcaptcha(
                             return "tilda_auto_submitted"
                     except Exception:
                         pass
-                # Fallback: Tilda didn't auto-submit
                 try:
                     await page.evaluate(r"""() => {
                         const btn = document.querySelector(
@@ -1818,7 +1772,6 @@ async def _handle_tilda_needcaptcha(
             page,
         )
         if not sitekey:
-            # Tilda-specific: из data-tilda-captchakey
             try:
                 sitekey = await page.evaluate(r"""() => {
                     const el = document.querySelector(
@@ -1861,7 +1814,6 @@ async def _handle_tilda_needcaptcha(
         if not token:
             return "solve_failed"
 
-        # Inject token into Tilda's form
         try:
             await page.evaluate(r"""t => {
                 // Standard SmartCaptcha hidden inputs
@@ -1900,7 +1852,6 @@ async def _handle_tilda_needcaptcha(
                 token=token[:30],
             )
 
-        # Tilda: trigger form re-submit
         try:
             await page.evaluate(r"""() => {
                 const btn = document.querySelector(
@@ -2062,13 +2013,9 @@ async def _handle_tilda_needcaptcha(
     await asyncio.sleep(2)
     return "ok"
 
-
 async def handle_post_submit_captcha(
     page, page_url, rucaptcha_key,
 ):
-    """Обработка капчи, появляющейся ПОСЛЕ submit.
-    Ждёт появления виджета SmartCaptcha/reCAPTCHA,
-    math-квиза и т.д."""
     log = get_logger()
 
     for wait_round in range(8):
@@ -2087,7 +2034,6 @@ async def handle_post_submit_captcha(
         if math_res == "ok":
             return "ok"
 
-        # SmartCaptcha: сначала кликаем чекбокс
         has_sc = await page.evaluate(r"""() => {
             const body = (
                 document.body.innerText || ''
@@ -2141,8 +2087,6 @@ async def handle_post_submit_captcha(
             )
             if clicked:
                 await asyncio.sleep(2)
-                # Проверяем: капча исчезла?
-                # Проверяем и body, и iframe src
                 still = await page.evaluate(r"""() => {
                     for (const f of document
                         .querySelectorAll('iframe')) {
@@ -2174,8 +2118,6 @@ async def handle_post_submit_captcha(
                     return /i.m not a robot|press to continue|smartcaptcha/i
                         .test(body);
                 }""")
-                # Дополнительно: есть ли ещё
-                #   непрочеканный checkbox во фреймах
                 if still:
                     sc_gone = False
                     for fr in page.frames:
@@ -2285,7 +2227,6 @@ async def handle_post_submit_captcha(
                         "smartcaptcha_click_challenge",
                     )
 
-            # Клик не помог — решаем через API
             if rucaptcha_key:
                 sitekey = (
                     await _extract_smartcaptcha_sitekey(
@@ -2333,12 +2274,8 @@ async def handle_post_submit_captcha(
                             "post_submit_no_sitekey",
                         )
 
-            # Не возвращаем None сразу — даём
-            # следующему раунду шанс (iframe может
-            # ещё загружаться)
             continue
 
-        # Не SmartCaptcha: ищем reCAPTCHA/hCaptcha
         if rucaptcha_key:
             info = await _get_sitekey(page)
             if info and info.get("key"):
@@ -2378,10 +2315,7 @@ async def handle_post_submit_captcha(
 
     return None
 
-
 async def detect_captcha_overlay(page) -> str:
-    """Обнаруживает полноэкранные капча-оверлеи.
-    Возвращает тип капчи или пустую строку."""
     try:
         return await page.evaluate(r"""() => {
             const body = (
@@ -2469,14 +2403,12 @@ async def detect_captcha_overlay(page) -> str:
     except Exception:
         return ""
 
-
 async def handle_captcha(
     page, page_url, rucaptcha_key,
     has_captcha_hint=False,
     captcha_type_hint=None,
     captcha_hint=None,
 ):
-    # 0. Прямой fast-path по hint из js_extractor
     if captcha_hint and captcha_hint.get("sitekey"):
         ctype = captcha_hint.get("type", "recaptcha")
         skey = captcha_hint["sitekey"]
@@ -2514,19 +2446,16 @@ async def handle_captcha(
         )
         return "ok" if ok else "inject_failed"
 
-    # 1. Математическая капча
     math_res = await _detect_math_captcha(page)
     if math_res == "ok":
         return "ok"
 
-    # 2. Slider-капча
     slider_res = await _detect_slider_captcha(
         page, rucaptcha_key,
     )
     if slider_res == "ok":
         return "ok"
 
-    # 3. Sitekey-капчи (reCAPTCHA, hCaptcha, etc.)
     info = await _get_sitekey(page)
 
     if not info and has_captcha_hint:
@@ -2551,7 +2480,6 @@ async def handle_captcha(
                 pass
 
     if not info:
-        # 4. SmartCaptcha overlay (без sitekey в DOM)
         cap_overlay = await detect_captcha_overlay(
             page
         )
@@ -2567,14 +2495,12 @@ async def handle_captcha(
                 return "no_key"
             return "solve_failed"
 
-        # 5. Картинка с текстом
         img_res = await _detect_image_captcha(
             page, rucaptcha_key,
         )
         if img_res == "ok":
             return "ok"
 
-        # 6. Иконки
         icon_res = await _detect_icon_captcha(
             page, rucaptcha_key,
         )

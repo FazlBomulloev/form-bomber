@@ -13,23 +13,19 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 AUTH_LOGIN = os.getenv("AUTH_LOGIN", "admin")
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "admin")
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me-to-random-secret-key-in-production")
-JWT_EXP_SECONDS = 60 * 60 * 24 * 7  # 7 days
-
+JWT_EXP_SECONDS = 60 * 60 * 24 * 7
 
 def _b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
 
 def _b64url_decode(s: str) -> bytes:
     s += "=" * (-len(s) % 4)
     return base64.urlsafe_b64decode(s)
 
-
 def _sign(payload: str) -> str:
     return _b64url_encode(
         hmac.new(JWT_SECRET.encode(), payload.encode(), hashlib.sha256).digest()
     )
-
 
 def create_token(login: str) -> str:
     header = _b64url_encode(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
@@ -41,7 +37,6 @@ def create_token(login: str) -> str:
     unsigned = f"{header}.{payload}"
     signature = _sign(unsigned)
     return f"{unsigned}.{signature}"
-
 
 def verify_token(token: str) -> dict | None:
     try:
@@ -58,7 +53,6 @@ def verify_token(token: str) -> dict | None:
         return payload
     except Exception:
         return None
-
 
 def check_credentials(login: str, password: str) -> bool:
     return login == AUTH_LOGIN and password == AUTH_PASSWORD

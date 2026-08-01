@@ -6,12 +6,7 @@ _TIMEOUT = aiohttp.ClientTimeout(total=20)
 _LOAD_URL = "https://mod.calltouch.ru/callback_load.php"
 _CALL_URL = "https://mod.calltouch.ru/callback_call.php"
 
-
 async def _collect_hidden_fields(page):
-    """Считывает все hidden-поля форм страницы (name→value)
-    для прямого POST-фолбэка. Возвращает
-    (hidden_dict, csrf_names). Так прямой POST несёт
-    существующие _token/csrf/nonce, а не только phone."""
     try:
         return await page.evaluate(r"""() => {
             const hidden = {};
@@ -30,7 +25,6 @@ async def _collect_hidden_fields(page):
     except Exception:
         return {"hidden": {}, "csrf": []}
 
-
 async def _get_calltouch_cookies(page):
     cookies = await page.context.cookies()
     session_id = None
@@ -41,7 +35,6 @@ async def _get_calltouch_cookies(page):
         elif c["name"] == "_ct_site_id":
             site_id = c["value"]
     return session_id, site_id
-
 
 async def try_calltouch(page, phone, name=""):
     log = get_logger()
@@ -63,9 +56,6 @@ async def try_calltouch(page, phone, name=""):
             f"site={site_id}, session={session_id[:8]}",
         )
 
-    # Собираем hidden/CSRF-поля исходной формы, чтобы
-    # прямой POST нёс все существующие поля (_token/csrf/
-    # nonce), а не только phone+name.
     hidden_data = await _collect_hidden_fields(page)
     hidden_fields = hidden_data.get("hidden", {}) or {}
     csrf_names = hidden_data.get("csrf", []) or []
@@ -127,8 +117,6 @@ async def try_calltouch(page, phone, name=""):
                 "callbackPeriod": "now",
                 "personalDataAgreement": True,
             }
-            # Добавляем существующие hidden/CSRF-поля формы,
-            # не перезатирая ключи Calltouch API.
             for hk, hv in hidden_fields.items():
                 if hk not in call_payload:
                     call_payload[hk] = hv

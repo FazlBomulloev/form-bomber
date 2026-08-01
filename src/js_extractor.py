@@ -1,20 +1,3 @@
-"""JS-код для извлечения структуры формы из DOM.
-
-v2: Chromium-style scoring (autofill-inspired):
-    - Каждое поле оценивается по нескольким signal-источникам
-      с приоритетами: autocomplete > type > inputmode > data-* >
-      name > label > aria-label > placeholder > class > id.
-    - Роль выбирается argmax по confidence, если выше threshold 0.5.
-    - Rationalization pass: дедуп, reject login/newsletter/search,
-      single text_unknown + phone → name.
-    - Расширенный output: captcha_hint, honeypots, csrf_token,
-      validation, mask, alternatives, submit_strategy.
-
-Backward compat (для form_finder.build_smart_plan):
-    - keys: fields[role,selector], form_selector, submit_selector, source.
-    - roles: phone, name, firstname, lastname, patronymic, email,
-      comment, date, checkbox_consent, dropdown, radio.
-"""
 
 from typing import Optional
 from logger import get_logger
@@ -1202,7 +1185,6 @@ FORM_EXTRACTOR_JS = r"""() => {
 
     return null;
 }"""
-
 
 async def extract_form_json(page) -> Optional[dict]:
     try:

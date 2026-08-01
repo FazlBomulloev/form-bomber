@@ -4,7 +4,6 @@ import aiosqlite
 from pathlib import Path
 from config import DB_PATH
 
-
 async def db_init():
     Path("data").mkdir(exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
@@ -118,7 +117,6 @@ async def db_init():
                 pass
         await db.commit()
 
-
 async def db_create_session(
     sid: str, name: str, total: int,
     queue_id: str = "", client_id: int = 0,
@@ -131,7 +129,6 @@ async def db_create_session(
             (sid, name, total, queue_id, client_id),
         )
         await db.commit()
-
 
 async def db_add_result(sid: str, url: str, res: dict):
     status = res["status"]
@@ -170,7 +167,6 @@ async def db_add_result(sid: str, url: str, res: dict):
             )
         await db.commit()
 
-
 async def db_finish_session(sid: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -178,7 +174,6 @@ async def db_finish_session(sid: str):
             "WHERE id=?", (sid,),
         )
         await db.commit()
-
 
 async def db_recover_stale():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -188,7 +183,6 @@ async def db_recover_stale():
         )
         await db.commit()
 
-
 async def db_get_sessions():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -197,7 +191,6 @@ async def db_get_sessions():
             "ORDER BY created_at DESC LIMIT 100"
         ) as c:
             return [dict(r) for r in await c.fetchall()]
-
 
 async def db_get_results(sid: str):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -209,10 +202,6 @@ async def db_get_results(sid: str):
             (sid,),
         ) as c:
             return [dict(r) for r in await c.fetchall()]
-
-
-# ── Queue ──────────────────────────────────────
-
 
 async def db_create_queue(
     qid: str, name: str, urls: list,
@@ -238,7 +227,6 @@ async def db_create_queue(
         )
         await db.commit()
 
-
 async def db_add_queue_client(
     queue_id: str, position: int,
     phone: str, firstname: str, lastname: str,
@@ -260,7 +248,6 @@ async def db_add_queue_client(
         await db.commit()
         return cur.lastrowid
 
-
 async def db_get_queue(qid: str):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -269,7 +256,6 @@ async def db_get_queue(qid: str):
         ) as c:
             row = await c.fetchone()
             return dict(row) if row else None
-
 
 async def db_get_queue_clients(qid: str):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -281,7 +267,6 @@ async def db_get_queue_clients(qid: str):
         ) as c:
             return [dict(r) for r in await c.fetchall()]
 
-
 async def db_update_queue_status(qid: str, status: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -289,7 +274,6 @@ async def db_update_queue_status(qid: str, status: str):
             (status, qid),
         )
         await db.commit()
-
 
 async def db_update_queue_progress(
     qid: str, current_idx: int, done: int,
@@ -301,7 +285,6 @@ async def db_update_queue_progress(
             (current_idx, done, qid),
         )
         await db.commit()
-
 
 async def db_update_client_status(
     client_id: int, status: str,
@@ -322,7 +305,6 @@ async def db_update_client_status(
             )
         await db.commit()
 
-
 async def db_get_active_queue():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -334,7 +316,6 @@ async def db_get_active_queue():
             row = await c.fetchone()
             return dict(row) if row else None
 
-
 async def db_get_last_queue():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -344,7 +325,6 @@ async def db_get_last_queue():
         ) as c:
             row = await c.fetchone()
             return dict(row) if row else None
-
 
 async def db_recover_stale_queues():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -358,10 +338,6 @@ async def db_recover_stale_queues():
         )
         await db.commit()
 
-
-# ── Form profiles cache ────────────────────────
-
-
 async def db_get_form_profile(domain: str):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -371,7 +347,6 @@ async def db_get_form_profile(domain: str):
         ) as c:
             row = await c.fetchone()
             return dict(row) if row else None
-
 
 async def db_save_form_profile(
     domain: str,
@@ -422,7 +397,6 @@ async def db_save_form_profile(
         )
         await db.commit()
 
-
 async def db_increment_profile_fail(domain: str) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -441,7 +415,6 @@ async def db_increment_profile_fail(domain: str) -> int:
         ) as c:
             row = await c.fetchone()
             return row[0] if row else 0
-
 
 async def db_delete_form_profile(domain: str):
     async with aiosqlite.connect(DB_PATH) as db:

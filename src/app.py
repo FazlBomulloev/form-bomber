@@ -27,7 +27,6 @@ from runner import (
     _ws_clients, _logs_ttl_loop, LOG_DIR,
 )
 
-
 @asynccontextmanager
 async def lifespan(app):
     await db_init()
@@ -43,7 +42,6 @@ async def lifespan(app):
         except (asyncio.CancelledError, Exception):
             pass
 
-
 app = FastAPI(lifespan=lifespan)
 app.mount(
     "/static",
@@ -53,13 +51,11 @@ app.mount(
 
 _PUBLIC_PATHS = {"/login", "/api/login", "/static"}
 
-
 def _get_token(request: Request) -> str | None:
     auth = request.headers.get("authorization", "")
     if auth.startswith("Bearer "):
         return auth[7:]
     return request.cookies.get("token")
-
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
@@ -75,11 +71,9 @@ async def auth_middleware(request: Request, call_next):
 
     return await call_next(request)
 
-
 class LoginRequest(BaseModel):
     login: str
     password: str
-
 
 class StartRequest(BaseModel):
     urls: list[str]
@@ -96,7 +90,6 @@ class StartRequest(BaseModel):
     session_name: str = "Проверка"
     max_attempts: int = 3
 
-
 class ClientData(BaseModel):
     phone: str
     firstname: str = ""
@@ -105,7 +98,6 @@ class ClientData(BaseModel):
     email: str = ""
     comment: str = ""
     proxy: str = ""
-
 
 class StartQueueRequest(BaseModel):
     urls: list[str]
@@ -117,11 +109,9 @@ class StartQueueRequest(BaseModel):
     queue_name: str = "Проверка"
     max_attempts: int = 3
 
-
 @app.get("/login")
 async def login_page():
     return FileResponse(str(_SRC / "static/login.html"))
-
 
 @app.post("/api/login")
 async def api_login(req: LoginRequest):
@@ -132,11 +122,9 @@ async def api_login(req: LoginRequest):
     resp.set_cookie("token", token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 7)
     return resp
 
-
 @app.get("/")
 async def index():
     return FileResponse(str(_SRC / "static/checker_ai.html"))
-
 
 @app.post("/api/start")
 async def api_start(req: StartRequest):
@@ -162,16 +150,13 @@ async def api_start(req: StartRequest):
         "total": len(req.urls),
     }
 
-
 @app.get("/api/sessions")
 async def api_sessions():
     return await db_get_sessions()
 
-
 @app.get("/api/sessions/{sid}/results")
 async def api_session_results(sid: str):
     return await db_get_results(sid)
-
 
 @app.get("/api/sessions/{sid}/export")
 async def api_session_export(sid: str):
@@ -199,7 +184,6 @@ async def api_session_export(sid: str):
             ),
         },
     )
-
 
 @app.post("/api/queue/start")
 async def api_queue_start(req: StartQueueRequest):
@@ -230,7 +214,6 @@ async def api_queue_start(req: StartQueueRequest):
         "total_urls": len(req.urls),
     }
 
-
 @app.get("/api/queue/active")
 async def api_active_queue():
     queue = await db_get_active_queue()
@@ -251,7 +234,6 @@ async def api_active_queue():
         "results": client_results,
     }
 
-
 @app.get("/api/queue/last")
 async def api_last_queue():
     queue = await db_get_last_queue()
@@ -270,7 +252,6 @@ async def api_last_queue():
         "results": client_results,
     }
 
-
 @app.post("/api/queue/stop")
 async def api_queue_stop():
     qid = runner._active_queue_id
@@ -278,7 +259,6 @@ async def api_queue_stop():
         return {"error": "Нет активной очереди"}
     await force_stop_all()
     return {"ok": True, "queue_id": qid}
-
 
 @app.get("/api/logs/download-all")
 async def api_logs_download_all():
@@ -305,10 +285,8 @@ async def api_logs_download_all():
         },
     )
 
-
 def _safe_domain(domain: str) -> str:
     return re.sub(r'[^a-zA-Z0-9._-]', '_', domain)
-
 
 @app.get("/api/sessions/{sid}/logs")
 async def api_session_logs(sid: str):
@@ -331,7 +309,6 @@ async def api_session_logs(sid: str):
     items.sort(key=lambda x: x["mtime"], reverse=True)
     return items
 
-
 @app.get("/api/sessions/{sid}/logs/{domain}")
 async def api_session_log(sid: str, domain: str):
     safe = _safe_domain(domain)
@@ -344,7 +321,6 @@ async def api_session_log(sid: str, domain: str):
         str(log_file),
         media_type="text/plain; charset=utf-8",
     )
-
 
 @app.post("/api/clients/parse-csv")
 async def api_parse_csv(file: UploadFile):
@@ -363,7 +339,6 @@ async def api_parse_csv(file: UploadFile):
             "proxy": row.get("proxy", ""),
         })
     return {"clients": clients}
-
 
 @app.websocket("/ws/queue/{qid}")
 async def ws_queue_endpoint(ws: WebSocket, qid: str):
@@ -384,7 +359,6 @@ async def ws_queue_endpoint(ws: WebSocket, qid: str):
     finally:
         _ws_clients.discard(ws)
 
-
 @app.websocket("/ws/{sid}")
 async def ws_endpoint(ws: WebSocket, sid: str):
     token = ws.query_params.get("token") or ws.cookies.get("token")
@@ -400,7 +374,6 @@ async def ws_endpoint(ws: WebSocket, sid: str):
         pass
     finally:
         _ws_clients.discard(ws)
-
 
 if __name__ == "__main__":
     import uvicorn

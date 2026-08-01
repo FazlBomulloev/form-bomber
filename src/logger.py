@@ -7,7 +7,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-
 class SiteLogger:
 
     def __init__(
@@ -264,11 +263,9 @@ class SiteLogger:
             "events": self._events,
         })
 
-
 _site_logger_var: contextvars.ContextVar = (
     contextvars.ContextVar("_site_logger", default=None)
 )
-
 
 def get_logger() -> Optional[SiteLogger]:
     return _site_logger_var.get(None)

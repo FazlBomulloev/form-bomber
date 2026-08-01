@@ -3,18 +3,12 @@ import random
 
 from config import COOKIE_BTN_TEXTS
 
-
-# Свежий десктопный Chrome UA (запасной, если не задан явно).
 STEALTH_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
 )
 
-# Init-script, маскирующий следы автоматизации. Применяется
-# на КОНТЕКСТ через context.add_init_script(STEALTH_JS) ДО
-# любой навигации — тогда патч действует на все страницы и
-# фреймы ещё до загрузки документа.
 STEALTH_JS = r"""() => {
     // navigator.webdriver -> undefined
     try {
@@ -125,30 +119,14 @@ STEALTH_JS = r"""() => {
     } catch (e) {}
 }"""
 
-
 async def apply_stealth(context):
-    """Навесить STEALTH_JS на КОНТЕКСТ до навигации.
-
-    Вызывать сразу после browser.new_context(...) и ДО
-    ctx.new_page()/goto — тогда патч сработает на всех
-    страницах и фреймах контекста. Ошибки проглатываются,
-    чтобы не ломать рабочий поток.
-    """
     try:
         await context.add_init_script(STEALTH_JS)
         return True
     except Exception:
         return False
 
-
 def build_stealth_context_kwargs(base=None):
-    """Дополнить kwargs для new_context реалистичными полями.
-
-    Аддитивно: НЕ перезаписывает уже переданные ключи
-    (user_agent, viewport, locale и т.п.). Только добавляет
-    недостающее — живой UA, ru-RU, Europe/Moscow и слегка
-    рандомизированный viewport.
-    """
     kwargs = dict(base) if base else {}
     kwargs.setdefault("user_agent", STEALTH_UA)
     kwargs.setdefault("locale", "ru-RU")
@@ -159,7 +137,6 @@ def build_stealth_context_kwargs(base=None):
             "height": random.randint(720, 900),
         }
     return kwargs
-
 
 async def step_shot(
     page, name, step_dir, form_el=None,
@@ -205,7 +182,6 @@ async def step_shot(
             log.log_shot(name, path_str)
     except Exception:
         pass
-
 
 async def dismiss_cookie_banners(
     page, cookie_selector=None
@@ -266,7 +242,6 @@ async def dismiss_cookie_banners(
         except Exception:
             continue
 
-
 async def suppress_widgets(page, keep_calltouch=False):
     try:
         await page.evaluate(r"""(keepCT) => {
@@ -315,7 +290,6 @@ async def suppress_widgets(page, keep_calltouch=False):
     except Exception:
         pass
 
-
 async def has_calltouch(page):
     try:
         return await page.evaluate(r"""() => {
@@ -332,7 +306,6 @@ async def has_calltouch(page):
         }""")
     except Exception:
         return False
-
 
 async def clear_overlays(page):
     try:
@@ -376,7 +349,6 @@ async def clear_overlays(page):
         }""")
     except Exception:
         pass
-
 
 async def dismiss_popups(page, form_el=None):
     try:
@@ -488,7 +460,6 @@ async def dismiss_popups(page, form_el=None):
     except Exception:
         pass
 
-
 async def smart_click(
     page, el, aggressive=False, timeout_ms=4000
 ):
@@ -520,7 +491,6 @@ async def smart_click(
         return True
     except Exception:
         return False
-
 
 async def find_el(page, raw_sel, timeout=1500):
     for sel in [
@@ -589,7 +559,6 @@ async def find_el(page, raw_sel, timeout=1500):
             continue
     return None
 
-
 async def scroll_page_for_lazy(page):
     try:
         for _ in range(12):
@@ -611,7 +580,6 @@ async def scroll_page_for_lazy(page):
         await asyncio.sleep(0.85)
     except Exception:
         pass
-
 
 async def react_patch_input(page, el, value):
     try:

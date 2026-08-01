@@ -2,7 +2,6 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-
 @dataclass
 class FormContext:
     html: str
@@ -10,7 +9,6 @@ class FormContext:
     trigger_href: Optional[str] = None
     trigger_text: Optional[str] = None
     frame: object = None
-
 
 def domain_from_url(url: str) -> str:
     m = re.match(r'https?://([^/]+)', url)

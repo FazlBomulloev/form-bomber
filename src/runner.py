@@ -56,7 +56,6 @@ _active_queue_task = None
 LOG_DIR = Path("data/logs")
 LOG_RETENTION_DAYS = 3
 
-
 def _cleanup_data_except_db():
     data_dir = Path("data")
     if not data_dir.exists():
@@ -72,7 +71,6 @@ def _cleanup_data_except_db():
         except Exception:
             pass
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-
 
 async def _logs_ttl_loop():
     while True:
@@ -95,7 +93,6 @@ async def _logs_ttl_loop():
             raise
         except Exception:
             pass
-
 
 async def force_stop_all():
     _queue_cancel.set()
@@ -125,7 +122,6 @@ _MSK = timezone(timedelta(hours=MSK_UTC_OFFSET))
 PROFILE_TTL_DAYS = 90
 PROFILE_FAIL_THRESHOLD = 2
 
-
 def _detect_signal_from_match(match: str) -> str:
     m = (match or "")[:15].upper()
     if m.startswith("NET"):
@@ -137,7 +133,6 @@ def _detect_signal_from_match(match: str) -> str:
     if "TILDA" in m:
         return "dom_tilda"
     return "dom"
-
 
 def _is_profile_usable(profile: dict) -> bool:
     if not profile:
@@ -167,7 +162,6 @@ def _is_profile_usable(profile: dict) -> bool:
         return False
     return True
 
-
 def _profile_to_instructions(profile: dict) -> dict:
     try:
         actions = json.loads(
@@ -190,11 +184,9 @@ def _profile_to_instructions(profile: dict) -> dict:
         "notes": "Из кеша профиля формы",
     }
 
-
 async def _maybe_save_profile(
     domain: str, result: dict, instructions: dict,
 ):
-    """Сохраняет профиль формы если submit удался."""
     if result.get("status") != "success":
         return
     if not instructions or not instructions.get(
@@ -239,7 +231,6 @@ async def _maybe_save_profile(
                 f"{str(e)[:100]}",
             )
 
-
 def _is_working_hours() -> bool:
     now = datetime.now(_MSK)
     start = now.replace(
@@ -254,7 +245,6 @@ def _is_working_hours() -> bool:
     )
     return start <= now < end
 
-
 def _seconds_until_work_start() -> float:
     now = datetime.now(_MSK)
     next_start = now.replace(
@@ -265,7 +255,6 @@ def _seconds_until_work_start() -> float:
     if now >= next_start:
         next_start += timedelta(days=1)
     return (next_start - now).total_seconds()
-
 
 async def _wait_for_working_hours(queue_id: str):
     if _is_working_hours():
@@ -301,7 +290,6 @@ async def _wait_for_working_hours(queue_id: str):
         "queue_id": queue_id,
     })
 
-
 def parse_proxy(raw: str) -> dict | None:
     if not raw or not raw.strip():
         return None
@@ -326,7 +314,6 @@ def parse_proxy(raw: str) -> dict | None:
         return {"server": f"http://{parts[0]}:{parts[1]}"}
     return None
 
-
 async def _reset_browser():
     global _browser, _pw
     _browser = None
@@ -336,7 +323,6 @@ async def _reset_browser():
     except Exception:
         pass
     _pw = None
-
 
 async def _get_browser():
     global _browser, _pw
@@ -358,7 +344,6 @@ async def _get_browser():
         )
         return _browser
 
-
 async def _ws_broadcast(data: dict):
     msg = json.dumps(data, ensure_ascii=False)
     dead = set()
@@ -368,7 +353,6 @@ async def _ws_broadcast(data: dict):
         except Exception:
             dead.add(ws)
     _ws_clients.difference_update(dead)
-
 
 def _classify_reason(result: dict) -> str:
     status = result.get("status", "")
@@ -387,7 +371,6 @@ def _classify_reason(result: dict) -> str:
         return "server_error"
     return "unknown"
 
-
 async def _try_fill_and_submit(
     page, instructions, phone,
     firstname, lastname, patronymic,
@@ -395,9 +378,6 @@ async def _try_fill_and_submit(
     step_dir, method_name,
     context=None,
 ):
-    """Общая логика: заполнить → капча → submit → детект.
-    context — Frame для iframe-форм, иначе page.
-    Возвращает (result_dict или None, fill_result)."""
     ctx = context or page
     log = _site_logger_var.get(None)
     actions = instructions.get("actions", [])
@@ -525,7 +505,6 @@ async def _try_fill_and_submit(
 
     return None, fill_result
 
-
 async def check_site_v2(
     url: str, phone: str,
     firstname: str = "", lastname: str = "",
@@ -563,15 +542,12 @@ async def check_site_v2(
             f"попытка {attempt_no}/{max_retries}",
         )
 
-        # ── 1. Браузер ──────────────────────────
         _logger.step("browser", "запуск")
         ctx_kwargs = {
             "user_agent": USER_AGENT,
             "viewport": {"width": 1280, "height": 900},
             "ignore_https_errors": True,
         }
-        # stealth: locale/timezone/недостающие поля (не перетирает
-        # заданные user_agent/viewport)
         ctx_kwargs = build_stealth_context_kwargs(ctx_kwargs)
         if proxy:
             ctx_kwargs["proxy"] = proxy
@@ -581,7 +557,6 @@ async def check_site_v2(
                 ctx = await browser.new_context(
                     **ctx_kwargs,
                 )
-                # антибот: navigator.webdriver и пр. — до навигации
                 await apply_stealth(ctx)
                 _active_contexts.add(ctx)
                 page = await ctx.new_page()
@@ -610,7 +585,6 @@ async def check_site_v2(
                 pass
             await dismiss_cookie_banners(page)
 
-            # ── Решаем captcha overlay до поиска формы
             pre_cap = await detect_captcha_overlay(page)
             if pre_cap:
                 _logger.warn(
@@ -625,7 +599,6 @@ async def check_site_v2(
                     _inject_captcha_token,
                 )
                 cap_solved = False
-                # Попробуем кликнуть чекбокс
                 clicked = (
                     await _try_click_smartcaptcha(page)
                 )
@@ -698,7 +671,6 @@ async def check_site_v2(
             tokens = 0
             cache_tried = False
 
-            # ── 1.5. Кеш профиля формы ─────────
             if attempt_no == 1:
                 cached = await db_get_form_profile(
                     domain,
@@ -734,7 +706,6 @@ async def check_site_v2(
                         _logger.ok(
                             "profile_cache: применён успешно",
                         )
-                        # запись профиля — единым хвостом
                     else:
                         new_fc = (
                             await db_increment_profile_fail(
@@ -763,7 +734,6 @@ async def check_site_v2(
                         f"last={cached.get('last_success_at')})",
                     )
 
-            # ── 2. Поиск формы ─────────────────
             if result["status"] != "success":
                 _logger.step("extract", "ищем форму")
                 form_json, form_ctx = (
@@ -778,7 +748,6 @@ async def check_site_v2(
                     page, "02_form_found", step_dir
                 )
 
-                # ── 3. Строим план ─────────────────
                 iframe_ctx = (
                     form_ctx.frame
                     if form_ctx and form_ctx.frame
@@ -797,7 +766,6 @@ async def check_site_v2(
                         instructions
                         and instructions.get("actions")
                     ):
-                        # ── 4. Заполняем + submit ──
                         sub, fill_res = (
                             await _try_fill_and_submit(
                                 page, instructions, phone,
@@ -843,7 +811,6 @@ async def check_site_v2(
                 form_json = None
                 iframe_ctx = None
 
-            # ── 5. AI fallback ─────────────────
             if (
                 result["status"] != "success"
                 and ai_key
@@ -855,8 +822,6 @@ async def check_site_v2(
                 page_html = await collect_full_html(
                     page
                 )
-                # скриншот только для vision-провайдера
-                # (DeepSeek — текстовый, скриншот не шлём)
                 shot_b64 = None
                 if is_vision_provider(ai_provider):
                     try:
@@ -954,7 +919,6 @@ async def check_site_v2(
                     )
                     result["reason_code"] = "no_form"
 
-            # ── Нет ключа AI и нет формы ───────
             if (
                 result["status"] != "success"
                 and not ai_key
@@ -966,7 +930,6 @@ async def check_site_v2(
                 )
                 result["reason_code"] = "no_form"
 
-            # ── Calltouch fallback ─────────────
             if (
                 result["status"] != "success"
                 and keep_ct
@@ -981,7 +944,6 @@ async def check_site_v2(
                 if ct_result:
                     result.update(ct_result)
 
-            # ── Проверка captcha overlay ───────
             if result["status"] not in (
                 "success", "captcha",
             ):
@@ -992,7 +954,6 @@ async def check_site_v2(
                     _logger.warn(
                         f"captcha overlay: {cap_type}"
                     )
-                    # Пробуем решить overlay
                     from captcha import (
                         _try_click_smartcaptcha
                         as _tcs_final,
@@ -1072,7 +1033,6 @@ async def check_site_v2(
                             "reason_code": "captcha",
                         })
 
-            # ── Финальный статус ────────────────
             if result["status"] not in (
                 "success", "captcha", "failed",
             ):
@@ -1124,7 +1084,6 @@ async def check_site_v2(
     _logger.finish(result)
     _site_logger_var.reset(_log_token)
     return result
-
 
 async def _process_one(
     url, phone, firstname, lastname, patronymic,
@@ -1245,7 +1204,6 @@ async def _process_one(
         if current is not None:
             _active_tasks.discard(current)
 
-
 async def _run_session_bg(
     sid, urls, phone,
     firstname, lastname, patronymic,
@@ -1283,7 +1241,6 @@ async def _run_session_bg(
             "session_id": sid,
         })
 
-
 async def run_session(
     urls: list, phone: str,
     firstname: str = "", lastname: str = "",
@@ -1318,10 +1275,6 @@ async def run_session(
         )
     )
     return sid
-
-
-# ── Multi-client queue ─────────────────────────
-
 
 async def _run_client(
     queue_id: str, client: dict,
@@ -1404,7 +1357,6 @@ async def _run_client(
         })
     return sid
 
-
 async def _run_queue_bg(queue_id: str):
     global _active_queue_id, _active_queue_task
     _active_queue_id = queue_id
@@ -1480,7 +1432,6 @@ async def _run_queue_bg(queue_id: str):
             "queue_id": queue_id,
             "status": final,
         })
-
 
 async def run_queue(
     urls: list, clients: list,

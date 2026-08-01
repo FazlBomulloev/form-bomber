@@ -1,5 +1,3 @@
-"""AI-провайдер: Claude и DeepSeek.
-Включает очистку HTML и сбор iframe-контента."""
 
 import json
 import os
@@ -7,8 +5,6 @@ import re
 import time
 import requests as _requests
 
-# .env подхватываем и здесь (идемпотентно, как в auth.py) — чтобы
-# os.getenv видел значения независимо от порядка импортов модулей.
 try:
     from pathlib import Path as _Path
     from dotenv import load_dotenv as _load_dotenv
@@ -18,46 +14,27 @@ except Exception:
 
 try:
     from logger import get_logger as _get_logger
-except Exception:  # логгер не обязателен для работы провайдера
+except Exception:
     _get_logger = None
 
-
-# Endpoint/модель/ключ каждого провайдера настраиваются через окружение.
-# Дефолты — текущие рабочие значения (прокси). Владелец может указать,
-# например, прямой Anthropic API:
-#   CLAUDE_URL=https://api.anthropic.com/v1/messages
-#   CLAUDE_MODEL=claude-sonnet-4-5
-#   CLAUDE_API_KEY=sk-ant-...
 CLAUDE_URL = os.getenv(
     "CLAUDE_URL", "https://api.oneprovider.dev/v1/messages")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
 DEEPSEEK_URL = os.getenv(
     "DEEPSEEK_URL", "https://api.deepseek.com/chat/completions")
-# deepseek-v4-pro — сильнейшая модель DeepSeek (точнее flash на
-# разборе форм). Можно понизить до deepseek-v4-flash через .env
-# ради скорости/цены.
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
 
-# Провайдер по умолчанию (Claude отдаёт 403 на текущем прокси —
-# основной рабочий провайдер DeepSeek). Меняется через .env.
 DEFAULT_PROVIDER = os.getenv("AI_PROVIDER", "deepseek").lower()
 
 AI_PROVIDERS = ("deepseek", "claude")
 
-# Провайдеры с поддержкой vision (картинка в промпте). DeepSeek V4 —
-# текстовая модель, поэтому скриншот ей не отправляется.
 _VISION_PROVIDERS = {"claude"}
-
 
 def is_vision_provider(provider: str) -> bool:
     return (provider or "").lower() in _VISION_PROVIDERS
 
-
 def _env_key(provider: str) -> str:
-    """Ключ провайдера из окружения (для fallback-провайдера, когда
-    пользовательский ключ передан только для основного). Для claude
-    принимаем и CLAUDE_API_KEY, и стандартный ANTHROPIC_API_KEY."""
     if provider == "claude":
         return (os.getenv("CLAUDE_API_KEY", "")
                 or os.getenv("ANTHROPIC_API_KEY", ""))
@@ -120,7 +97,6 @@ type/placeholder), чтобы они однозначно попадали в н
 HTML страницы:
 %%HTML%%"""
 
-
 _STRIP_TAGS = re.compile(
     r'<(script|style|noscript|svg|path|iframe|video'
     r'|audio|picture|source|link|meta|symbol|defs'
@@ -156,7 +132,6 @@ _EMPTY_TAG = re.compile(
 _MULTI_WS = re.compile(r'[ \t]+')
 _MULTI_NL = re.compile(r'\n{3,}')
 
-
 def _strip_attrs(tag_match):
     full = tag_match.group(0)
     lt = full.index('<')
@@ -172,7 +147,6 @@ def _strip_attrs(tag_match):
             kept.append(m.group(0))
     close = '/>' if full.rstrip().endswith('/>') else '>'
     return f'<{tag_name}{"".join(kept)}{close}'
-
 
 def clean_html(raw_html: str, limit: int = 8000) -> str:
     h = raw_html
@@ -250,7 +224,6 @@ def clean_html(raw_html: str, limit: int = 8000) -> str:
 
     return h[:limit] + '\n...(обрезано)'
 
-
 def _expand_ai_response(short: dict) -> dict:
     actions = []
     for a in short.get('a', []):
@@ -274,20 +247,13 @@ def _expand_ai_response(short: dict) -> dict:
         'notes': short.get('n', ''),
     }
 
-
 class AIParseError(ValueError):
-    """JSON-ответ AI не распарсился. raw_text — что
-    реально вернул провайдер (для разборов)."""
 
     def __init__(self, message: str, raw_text: str = ""):
         super().__init__(message)
         self.raw_text = raw_text or ""
 
-
 def _parse(content):
-    """Достаёт первый JSON-объект из ответа AI.
-    Терпит markdown-обёртку, лишний текст до/после
-    JSON, SSE-префиксы прокси."""
     if not content or not content.strip():
         raise AIParseError(
             "пустой ответ AI",
@@ -321,7 +287,6 @@ def _parse(content):
         return _expand_ai_response(raw)
     return raw
 
-
 def _retry(fn, *args, retries=3, delay=4):
     last = None
     for i in range(retries):
@@ -334,10 +299,7 @@ def _retry(fn, *args, retries=3, delay=4):
                 time.sleep(min(wait, 30))
     raise last
 
-
 def _claude_call(prompt, system, api_key, screenshot_b64=None):
-    # content: строка, либо (при наличии скриншота) список блоков
-    # text + image — Claude умеет vision.
     if screenshot_b64:
         user_content = [
             {"type": "text", "text": prompt},
@@ -376,7 +338,6 @@ def _claude_call(prompt, system, api_key, screenshot_b64=None):
     resp.raise_for_status()
     return resp.json()
 
-
 def _deepseek_call(prompt, system, api_key):
     sess = _requests.Session()
     sess.headers["Connection"] = "close"
@@ -401,7 +362,6 @@ def _deepseek_call(prompt, system, api_key):
     resp.raise_for_status()
     return resp.json()
 
-
 def _extract_claude(data):
     content = ""
     for block in data.get("content", []):
@@ -414,7 +374,6 @@ def _extract_claude(data):
         + usage.get("output_tokens", 0)
     )
     return content, tokens
-
 
 def _extract_deepseek(data):
     choices = data.get("choices") or []
@@ -429,11 +388,7 @@ def _extract_deepseek(data):
     )
     return content, tokens
 
-
 def _dispatch(provider, prompt, api_key, screenshot_b64=None):
-    """Один вызов конкретного провайдера → (content, tokens).
-    screenshot_b64 передаётся только vision-провайдерам (DeepSeek —
-    текстовая модель, скриншот игнорируется)."""
     if provider == "deepseek":
         data = _retry(
             _deepseek_call, prompt, _SYSTEM, api_key,
@@ -445,7 +400,6 @@ def _dispatch(provider, prompt, api_key, screenshot_b64=None):
     )
     return _extract_claude(data)
 
-
 def _log_warn(msg, **kw):
     if not _get_logger:
         return
@@ -456,18 +410,8 @@ def _log_warn(msg, **kw):
     except Exception:
         pass
 
-
 def ask_ai_sync(page_html, url, api_key, provider=None,
                 screenshot_b64=None):
-    """Принимает сырой HTML, чистит, отправляет в выбранный AI.
-    Возвращает (result_dict, tokens, provider).
-
-    Отказоустойчивость: если основной провайдер падает (403/таймаут/
-    битый JSON), пробуем следующего из AI_PROVIDERS. Ключ основного
-    провайдера — переданный api_key (или env), ключ fallback-провайдера
-    берётся из окружения (_env_key). При исчерпании всех провайдеров
-    поднимаем последнюю ошибку (AIParseError сохраняет raw_text/tokens
-    для разбора в runner)."""
     cleaned = clean_html(page_html)
     prompt = _PROMPT.replace("%%HTML%%", cleaned)
 
@@ -477,7 +421,6 @@ def ask_ai_sync(page_html, url, api_key, provider=None,
             f"Неизвестный AI-провайдер: {provider}"
         )
 
-    # Порядок: запрошенный провайдер первым, затем остальные (fallback).
     order = [provider] + [
         p for p in AI_PROVIDERS if p != provider
     ]
@@ -487,8 +430,6 @@ def ask_ai_sync(page_html, url, api_key, provider=None,
     tried_any = False
 
     for prov in order:
-        # основной провайдер использует переданный ключ (или env),
-        # fallback-провайдер — только env-ключ.
         key = api_key if prov == provider else ""
         if not key:
             key = _env_key(prov)
@@ -529,7 +470,6 @@ def ask_ai_sync(page_html, url, api_key, provider=None,
 
         return parsed, total_tokens, prov
 
-    # Все провайдеры исчерпаны.
     if not tried_any:
         raise RuntimeError(
             f"{provider} API ключ не указан"
@@ -541,9 +481,7 @@ def ask_ai_sync(page_html, url, api_key, provider=None,
         raise last_exc
     raise RuntimeError("AI: все провайдеры недоступны")
 
-
 async def collect_full_html(page):
-    """Собирает HTML главной страницы + все iframe."""
     parts = []
     try:
         main_html = await page.content()

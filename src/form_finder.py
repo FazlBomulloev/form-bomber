@@ -71,7 +71,6 @@ _TRIGGER_KEYWORDS_FLAT = [
     kw for group in TRIGGER_PRIORITY for kw in group
 ]
 
-
 async def _has_phone_visible(page) -> bool:
     try:
         return bool(await page.evaluate(
@@ -91,7 +90,6 @@ async def _has_phone_visible(page) -> bool:
         ))
     except Exception:
         return False
-
 
 async def _wait_form_after_trigger(
     page, timeout=8000,
@@ -121,7 +119,6 @@ async def _wait_form_after_trigger(
         return await _has_phone_visible(page)
     except Exception:
         return False
-
 
 async def _is_widget_btn(el) -> bool:
     try:
@@ -170,8 +167,6 @@ async def _is_widget_btn(el) -> bool:
         )
         import json
         info = json.loads(sig)
-        # Если aria/title содержит наши keywords —
-        # это не виджет, даже если fixed+круглая.
         if info.get("kwHit"):
             return False
         if _WIDGET_RE.search(info["sig"]):
@@ -181,7 +176,6 @@ async def _is_widget_btn(el) -> bool:
         return False
     except Exception:
         return False
-
 
 async def _collect_trigger_buttons(page):
     log = get_logger()
@@ -200,7 +194,6 @@ async def _collect_trigger_buttons(page):
                 await el.inner_text()
             ).lower().strip()
             if not text:
-                # пробуем aria-label, title, data-tooltip
                 for attr in (
                     'aria-label', 'title',
                     'data-tooltip', 'data-text',
@@ -211,7 +204,6 @@ async def _collect_trigger_buttons(page):
                         if text:
                             break
             if not text:
-                # последний шанс — вложенный <span>
                 try:
                     span_text = await el.evaluate(
                         r"""el => {
@@ -258,10 +250,7 @@ async def _collect_trigger_buttons(page):
         )
     return buttons
 
-
 async def _aggressive_form_reveal(page):
-    """Принудительный поиск: раскрытие скрытых форм,
-    вызов CMS-функций, удаление overlay-блокеров."""
     log = get_logger()
     if log:
         log.step(
@@ -508,10 +497,7 @@ async def _aggressive_form_reveal(page):
 
     return None
 
-
 async def _find_in_iframes(page):
-    """Параллельный обход всех child-фреймов: первый
-    же фрейм с лидовой формой (phone-поле) выигрывает."""
     log = get_logger()
     targets = [
         f for f in page.frames
@@ -558,11 +544,7 @@ async def _find_in_iframes(page):
                 t.cancel()
     return None, None
 
-
 async def _mutation_observer_retry(page):
-    """Если форма не нашлась — ждём 3 сек, наблюдая
-    за DOM. Триггерим scroll/mouseenter. Если phone
-    input появился — повторяем extract_form_json."""
     log = get_logger()
     try:
         await page.evaluate(r"""() => {
@@ -597,7 +579,6 @@ async def _mutation_observer_retry(page):
     except Exception:
         return None
 
-    # Триггерим scroll + hover на body
     try:
         await page.evaluate(r"""() => {
             window.scrollTo(0, document.body.scrollHeight / 2);
@@ -608,7 +589,6 @@ async def _mutation_observer_retry(page):
     except Exception:
         pass
 
-    # Ждём до 3 сек
     for _ in range(15):
         await asyncio.sleep(0.2)
         try:
@@ -625,7 +605,6 @@ async def _mutation_observer_retry(page):
         except Exception:
             break
 
-    # Disconnect observer
     try:
         await page.evaluate(r"""() => {
             try { window.__fbFormMO?.disconnect(); }
@@ -635,24 +614,15 @@ async def _mutation_observer_retry(page):
     except Exception:
         pass
 
-    # Повторный extract
     data = await extract_form_json(page)
     return data
 
-
-# ─────────────────────────────────────────────────
-# 4.3. Классификация ТИПА формы (лёгкий скоринг)
-# ─────────────────────────────────────────────────
-
-# submit-кнопка «поиска» — минус-сигнал
 _SEARCH_SUBMIT_RE = re.compile(
     r"найти|искать|search|поиск", re.I,
 )
-# submit-кнопка «подписки/рассылки» — минус-сигнал
 _NEWSLETTER_SUBMIT_RE = re.compile(
     r"подписа|subscribe|рассылк|newsletter", re.I,
 )
-# submit-кнопка лидовой формы — плюс-сигнал
 _LEAD_SUBMIT_RE = re.compile(
     r"заказать звонок|перезвон|записаться|\bзапис|"
     r"оставить заявк|\bзаявк|консультац|"
@@ -660,17 +630,9 @@ _LEAD_SUBMIT_RE = re.compile(
     re.I,
 )
 
-
 def _score_form_type(
     form_json: dict, submit_text: str = "",
 ) -> dict:
-    """4.3: лёгкий скоринг ТИПА формы по уже доступным
-    данным (роли/типы полей + текст submit-кнопки).
-
-    Возвращает {type, score, reasons}. Чем выше score,
-    тем увереннее, что форму можно заполнять; сильный
-    минус — чужая форма (поиск/логин/подписка).
-    """
     fields = form_json.get("fields") or []
     st = (submit_text or "").lower()
 
@@ -693,7 +655,6 @@ def _score_form_type(
     reasons = []
     ftype = "contact"
 
-    # ── ПЛЮС-сигналы (приоритет лидовой формы) ──
     if has_phone:
         score += 30
         reasons.append("+phone")
@@ -704,7 +665,6 @@ def _score_form_type(
         score += 8
         reasons.append("+textarea")
 
-    # ── МИНУС-сигналы (чужие формы) ──
     if has_password:
         score -= 60
         reasons.append("-password")
@@ -733,7 +693,6 @@ def _score_form_type(
         if ftype == "contact":
             ftype = "newsletter"
 
-    # ── Итоговый тип ──
     if ftype == "contact" and has_phone and score > 0:
         ftype = "lead"
 
@@ -742,10 +701,7 @@ def _score_form_type(
         "reasons": reasons,
     }
 
-
 async def _get_submit_text(ctx, form_json: dict) -> str:
-    """Текст submit-кнопки формы (для скоринга типа).
-    ctx — page или frame, где живёт форма."""
     sel = form_json.get("submit_selector")
     if not sel or ctx is None:
         return ""
@@ -762,11 +718,7 @@ async def _get_submit_text(ctx, form_json: dict) -> str:
     except Exception:
         return ""
 
-
 async def _accept_form(ctx, form_json: dict, log) -> bool:
-    """Скоринг типа формы + лог. Возвращает False, если
-    форма явно чужая (поиск/логин/подписка) — тогда её
-    не сдаём как результат и продолжаем поиск."""
     try:
         submit_text = await _get_submit_text(
             ctx, form_json,
@@ -789,11 +741,6 @@ async def _accept_form(ctx, form_json: dict, log) -> bool:
         return False
     return True
 
-
-# ─────────────────────────────────────────────────
-# 4.2. Поиск контакт-страницы при промахе
-# ─────────────────────────────────────────────────
-
 _CONTACT_PATHS = [
     "/kontakty", "/contacts", "/contact", "/contact-us",
     "/zapis", "/zayavka", "/online-zapis",
@@ -807,10 +754,7 @@ _CONTACT_LINK_RE = re.compile(
     re.I,
 )
 
-
 async def _collect_contact_links(page):
-    """Ссылки на текущей странице, ведущие к контактам/
-    записи/обратной связи (текст ИЛИ href подходит)."""
     try:
         hrefs = await page.evaluate(
             r"""(pattern) => {
@@ -847,13 +791,7 @@ async def _collect_contact_links(page):
     except Exception:
         return []
 
-
 async def _find_contact_page(page, log):
-    """4.2: форма не найдена на целевой странице — пробуем
-    контакт-страницы. Сначала ссылки-кандидаты со страницы,
-    затем типовые пути от корня домена. Ограничение: ≤4
-    перехода, общий бюджет ~15с, без ухода на внешний домен.
-    Возвращает (form_json, FormContext) или (None, None)."""
     try:
         cur = page.url
     except Exception:
@@ -875,7 +813,6 @@ async def _find_contact_page(page, log):
             p = urlparse(u)
         except Exception:
             return
-        # внешний домен — пропускаем
         if p.netloc and p.netloc.lower() != host:
             return
         norm = u.split("#")[0].rstrip("/")
@@ -886,10 +823,8 @@ async def _find_contact_page(page, log):
         seen.add(norm)
         candidates.append(u)
 
-    # 1) ссылки со страницы (надёжнее — точно существуют)
     for link in await _collect_contact_links(page):
         _add(link)
-    # 2) типовые пути от корня домена (RU + EN)
     for path in _CONTACT_PATHS:
         _add(urljoin(origin + "/", path.lstrip("/")))
 
@@ -941,7 +876,6 @@ async def _find_contact_page(page, log):
             return form_json, ctx
     return None, None
 
-
 async def extract_forms(
     page, allow_contact_search: bool = True,
 ) -> tuple:
@@ -949,7 +883,6 @@ async def extract_forms(
 
     await scroll_page_for_lazy(page)
 
-    # ── Шаг 1a: DOM main_frame + iframe параллельно ──
     if log:
         log.step("extract", "ищем форму в DOM")
 
@@ -988,13 +921,9 @@ async def extract_forms(
             return form_json, FormContext(
                 html="", source="form",
             )
-        # Похоже на чужую форму (логин/поиск) —
-        # продолжаем поиск лидовой формы (iframe_task
-        # НЕ отменяем — используем его результат ниже).
         form_json = None
         has_phone_main = False
 
-    # main не дал лидовой формы — ждём iframe
     iframe_form, iframe_frame = None, None
     try:
         iframe_form, iframe_frame = await iframe_task
@@ -1013,7 +942,6 @@ async def extract_forms(
         form_json if has_phone_main else None
     )
 
-    # ── Шаг 2: кнопки по приоритету ──────────
     if log:
         log.step(
             "trigger",
@@ -1114,7 +1042,6 @@ async def extract_forms(
         except Exception:
             continue
 
-    # ── Шаг 2.5: агрессивное JS-раскрытие ──
     agg_form = await _aggressive_form_reveal(page)
     if agg_form and await _accept_form(
         page, agg_form, log,
@@ -1129,7 +1056,6 @@ async def extract_forms(
             html="", source="aggressive_reveal",
         )
 
-    # ── Шаг 3: скрытая форма как fallback ──
     if hidden_backup and await _accept_form(
         page, hidden_backup, log,
     ):
@@ -1142,9 +1068,6 @@ async def extract_forms(
             html="", source="hidden_form",
         )
 
-    # ── Шаг 4: повторный обход iframe ─────
-    # На случай если фрейм только что появился
-    # после кликов или JS-reveal.
     iframe_form2, frame2 = await _find_in_iframes(page)
     if iframe_form2 and await _accept_form(
         frame2, iframe_form2, log,
@@ -1154,7 +1077,6 @@ async def extract_forms(
             frame=frame2,
         )
 
-    # ── Шаг 6: MutationObserver retry ────────
     mo_form = await _mutation_observer_retry(page)
     if mo_form and mo_form.get("fields"):
         has_phone = any(
@@ -1170,21 +1092,15 @@ async def extract_forms(
                 html="", source="mutation_observer",
             )
 
-    # ── Шаг 6.5: поиск контакт-страницы (4.2) ──
-    # Форма не найдена на текущей странице — пробуем
-    # типовые контакт-URL и ссылки-кандидаты. Флаг
-    # allow_contact_search защищает от рекурсии.
     if allow_contact_search:
         cp_form, cp_ctx = await _find_contact_page(page, log)
         if cp_form:
             return cp_form, cp_ctx
 
-    # ── Шаг 7: не нашли ─────────────────────
     if log:
         log.warn("форма не найдена ни в DOM, "
                  "ни по кнопкам, ни в iframe")
     return None, FormContext(html="", source="none")
-
 
 def build_smart_plan(form_json: dict) -> dict:
     if not form_json or not form_json.get("fields"):
@@ -1328,7 +1244,6 @@ def build_smart_plan(form_json: dict) -> dict:
         ],
         "notes": notes,
     }
-
 
 async def resolve_form_el(
     page, form_selector: Optional[str],

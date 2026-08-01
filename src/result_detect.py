@@ -5,11 +5,7 @@ from urllib.parse import unquote_plus as _unquote
 from config import SUCCESS_TEXTS, ERROR_PHRASES
 from logger import get_logger as _get_log
 
-
 def _decode_post_body(s: str) -> str:
-    """Нормализует POST body: URL-decode, HTML entities,
-    JSON unicode-escape — чтобы телефон совпал в любом
-    формате (form-urlencoded / JSON / multipart)."""
     if not s:
         return ""
     try:
@@ -21,7 +17,6 @@ def _decode_post_body(s: str) -> str:
     except Exception:
         pass
     try:
-        # + → +, 0 → 0 и т.п.
         s = _re.sub(
             r"\\u([0-9a-fA-F]{4})",
             lambda m: chr(int(m.group(1), 16)),
@@ -31,7 +26,6 @@ def _decode_post_body(s: str) -> str:
         pass
     return s
 
-# ── Единые паттерны (используются и в Python и в JS) ─
 OK_PATTERN = (
     r"success|\"ok\"|\"status\"\s*:\s*\"?(?:ok|true)"
     r"|спасибо|thank|принят|отправлен|записан|получили"
@@ -45,10 +39,6 @@ ERR_PATTERN = (
     r"error|\"status\"\s*:\s*\"?(?:fail|error)"
     r"|ошибка|invalid|captcha|validation"
 )
-# Однозначные признаки провала: ловят false-positive,
-# когда тело содержит слово "success" внутри
-# "success":false и т.п. Если STRICT_ERR матчится —
-# OK-сигналы из того же body не учитываем.
 STRICT_ERR_PATTERN = (
     r"\"success\"\s*:\s*false"
     r"|\"ok\"\s*:\s*false"
@@ -58,8 +48,6 @@ STRICT_ERR_PATTERN = (
     r"|class\s*=\s*\"[^\"]*\b(?:error|invalid|fail)\b"
     r"|class\s*=\s*'[^']*\b(?:error|invalid|fail)\b"
 )
-# Сильные success-сигналы, которые даже на фоне
-# strict-error остаются истиной (mail_sent у wpcf7).
 STRONG_OK_PATTERN = (
     r"mail_sent|message_sent|sent_ok"
     r"|wpcf7mailsent"
@@ -81,14 +69,10 @@ SKIP_URL_PATTERN = (
     r"|favicon|\.png|\.jpg|\.svg|\.woff"
     r"|top-fwz1\.mail\.ru|vk\.com/rtrg|/batch\b"
 )
-# Аналитические goal-эндпоинты (calltouch, метрика):
-# слабый сигнал, а не ошибка. calltouch НЕ в SKIP,
-# чтобы можно было использовать как weak-success.
 GOAL_URL_PATTERN = (
     r"calltouch|auto_goal_event|set_external_data"
     r"|reachgoal|/goal(\b|_|/)|/watch\b"
 )
-# URL-редиректа/страницы, выглядящие как успех/провал.
 OK_URL_PATTERN = (
     r"thank|success|spasibo|thanks|готово|blagodar"
     r"|принят|отправлен|#success|order.?success"
@@ -125,46 +109,30 @@ _FAIL_URL_RE = _re.compile(
     FAIL_URL_PATTERN, _re.IGNORECASE,
 )
 
-
 def _looks_like_success(body: str) -> bool:
-    """OK-сигнал в body, но если есть strict-error и
-    нет сильного OK — это всё-таки провал."""
     if not body:
         return False
     if _STRICT_ERR_RE.search(body) and not _STRONG_OK_RE.search(body):
         return False
     return bool(_OK_RE.search(body))
 
-
 def _url_host(u: str) -> str:
-    """Хост из URL (без схемы/порта), lower-case."""
     if not u:
         return ""
     m = _re.match(r"[a-zA-Z][\w+.\-]*://([^/:?#]+)", u)
     return (m.group(1) if m else "").lower()
 
-
 def _looks_success_url(loc: str) -> bool:
-    """URL редиректа выглядит как страница успеха?
-    (thank/success/spasibo/готово/#success…) и НЕ
-    содержит error/fail/invalid."""
     if not loc:
         return False
     if _FAIL_URL_RE.search(loc):
         return False
     return bool(_OK_URL_RE.search(loc))
 
-
 def _js_re(pattern: str) -> str:
-    """Сериализует паттерн как литерал JS-строки
-    для безопасной подстановки в page.evaluate."""
     return _json.dumps(pattern)
 
-
 class PlaywrightNetworkListener:
-    """Перехватчик POST на уровне Playwright CDP.
-    Проверяет наличие телефона в POST body чтобы
-    отличить отправку формы от прочих запросов."""
 
     def __init__(self, phone=""):
         self._raw = []
@@ -242,7 +210,6 @@ class PlaywrightNetworkListener:
         self._raw.clear()
 
     def _is_our_request(self, post_data):
-        """POST содержит наш телефон в любом формате?"""
         if not self._phone_short or not post_data:
             return False
         decoded = _decode_post_body(post_data)
@@ -250,9 +217,6 @@ class PlaywrightNetworkListener:
         return self._phone_short in digits
 
     def _same_origin(self, url):
-        """URL с того же хоста, что и целевая страница
-        (или его поддомен)? Нужно чтобы считать POST
-        «форменным» даже без телефона в теле."""
         if not self._page_host:
             return False
         host = _url_host(url)
@@ -265,10 +229,6 @@ class PlaywrightNetworkListener:
         )
 
     def _is_form_post(self, url, post_data):
-        """«Форменный» POST: наш телефон, form-подобный
-        url ИЛИ same-origin (и не аналитика/цель).
-        Расширяет пометку за пределы точного совпадения
-        телефона (Tilda/multipart дробят номер)."""
         if _GOAL_URL_RE.search(url):
             return False
         if self._is_our_request(post_data):
@@ -278,8 +238,6 @@ class PlaywrightNetworkListener:
         return self._same_origin(url)
 
     async def check_result(self):
-        """Анализирует перехваченные POST-ответы.
-        Приоритет: запросы с нашим телефоном."""
         log = _get_log()
         if not self._raw:
             if log:
@@ -295,9 +253,6 @@ class PlaywrightNetworkListener:
         our_result = None
         other_result = None
 
-        # P2: был ли в этой сессии наш форменный POST
-        # 2xx/3xx — тогда аналитическую goal-цель можно
-        # трактовать как слабый success.
         had_form_post = False
         for e in self._raw:
             st = e["status"]
@@ -351,8 +306,6 @@ class PlaywrightNetworkListener:
 
             is_form_url = _FORM_URL_RE.search(url)
             is_goal = bool(_GOAL_URL_RE.search(url))
-            # P0-2: «форменный» POST — телефон в теле,
-            # form-url ИЛИ same-origin (не аналитика).
             is_form_post = self._is_form_post(
                 url, post_data,
             )
@@ -365,10 +318,6 @@ class PlaywrightNetworkListener:
                 and not _STRONG_OK_RE.search(body)
             )
             if is_goal:
-                # P2: аналитическая цель — слабый сигнал.
-                # likely_success только если уже был наш
-                # форменный POST; иначе НЕ ошибка и не
-                # перебиваем реальный сигнал (r=None).
                 if had_form_post and 200 <= status < 400:
                     r = {
                         "state": "likely_success",
@@ -406,10 +355,6 @@ class PlaywrightNetworkListener:
                         ),
                     }
             elif 300 <= status < 400:
-                # P0-1: PRG/302-редирект на нашем POST —
-                # гарантированный success у Drupal/Bitrix/
-                # PHP. Тело 3xx НЕ читаем (Playwright
-                # бросает); берём только location.
                 loc = ""
                 try:
                     loc = (
@@ -447,8 +392,6 @@ class PlaywrightNetworkListener:
                 continue
 
             if is_ours:
-                # Приоритет внутри our:
-                #   success > error > likely_success
                 if r["state"] == "success":
                     our_result = r
                 elif (
@@ -478,10 +421,7 @@ class PlaywrightNetworkListener:
                 log.warn("net_result: None")
         return result
 
-
 async def _fallback_detect(page, pre_text, url_changed):
-    """Fallback-детекция когда основной evaluate упал
-    (например, страница перешла и form_el стал stale)."""
     try:
         text = await page.evaluate(
             "() => (document.body.innerText || '')"
@@ -535,11 +475,7 @@ async def _fallback_detect(page, pre_text, url_changed):
 
     return {"state": "unchanged", "match": ""}
 
-
 async def setup_xhr_listener(page):
-    """Перехватывает fetch/XHR чтобы отследить
-    ответы сервера после submit. Ring-buffer до 100
-    записей, чтобы не утекать на SPA."""
     try:
         await page.evaluate(r"""() => {
             window.__fbXHR = [];
@@ -662,10 +598,7 @@ async def setup_xhr_listener(page):
     except Exception:
         pass
 
-
 async def check_xhr_result(page):
-    """Проверяет перехваченные XHR/fetch на
-    признаки успеха или ошибки."""
     try:
         return await page.evaluate(
             r"""(pats) => {
@@ -786,7 +719,6 @@ async def check_xhr_result(page):
     except Exception:
         return None
 
-
 async def capture_pre_submit_text(page, form_el=None):
     try:
         return await page.evaluate(
@@ -796,7 +728,6 @@ async def capture_pre_submit_text(page, form_el=None):
         }""")
     except Exception:
         return ""
-
 
 async def detect_submission_result(
     page, form_el=None, pre_text="",
@@ -1066,7 +997,6 @@ async def detect_submission_result(
 
     _log = _get_log()
 
-    # ── 1. NET (Playwright CDP) — самый надёжный ──
     net = None
     if net_listener:
         net = await net_listener.check_result()
@@ -1074,10 +1004,6 @@ async def detect_submission_result(
     if net and net.get("state") == "success":
         return net
 
-    # ── 1b. NET error на нашем POST бьёт DOM success ─
-    # Если сервер вернул 4xx/5xx или error-body на
-    # запросе с нашим телефоном, доверять кешированному
-    # "спасибо" в DOM нельзя.
     if (
         net
         and net.get("state") == "error"
@@ -1085,7 +1011,6 @@ async def detect_submission_result(
     ):
         return net
 
-    # ── 2. JS-level XHR ──
     xhr = await check_xhr_result(page)
     if _log:
         _ds = dom_result.get("state", "?")
@@ -1101,7 +1026,6 @@ async def detect_submission_result(
     if xhr and xhr.get("state") == "success":
         return xhr
 
-    # ── 3. NET likely_success (POST 2xx form-url) ──
     if net and net.get("state") == "likely_success":
         ds = dom_result.get("state")
         if ds in (
@@ -1109,11 +1033,6 @@ async def detect_submission_result(
         ):
             return net
 
-    # ── 3b. Защита от false-positive "form reset" ──
-    # Если DOM сказал likely_success по сбросу полей,
-    # но в сети нет ни одного нашего POST — это
-    # подозрительно (форма могла сброситься из-за
-    # клиентской валидации без отправки).
     if (
         dom_result.get("state") == "likely_success"
         and "form reset" in dom_result.get("match", "")
@@ -1137,19 +1056,16 @@ async def detect_submission_result(
                 "match": "form reset (unverified)",
             }
 
-    # ── 4. DOM ──
     ds = dom_result.get("state")
     if ds not in ("unchanged", "likely_failed"):
         return dom_result
 
-    # ── 5. Fallback: XHR/NET non-success ──
     if xhr:
         return xhr
     if net:
         return net
 
     return dom_result
-
 
 async def get_invalid_field_hint(page):
     try:
