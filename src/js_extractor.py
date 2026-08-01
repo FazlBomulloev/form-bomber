@@ -681,22 +681,25 @@ FORM_EXTRACTOR_JS = r"""() => {
             }
         }
 
-        // 3. Single text_unknown + phone → это name (default)
+        // 3. Single text_unknown + phone → это name (default).
+        // P1-5: среди нераспознанных видимых текстовых полей
+        // приоритетно берём Tilda/name-хинтовое поле (placeholder/label/
+        // data-tilda-rule содержит «имя»/name/«как вас зовут»), а не
+        // просто первое. Так имя на Tilda не теряется.
         const hasPhone = fields.some(f => f.role === 'phone');
         const hasAnyName = fields.some(
             f => ['name','firstname','lastname'].includes(f.role));
         if (hasPhone && !hasAnyName) {
             const unknowns = fields.filter(
-                f => f.role === 'text_unknown' && f.visible);
-            if (unknowns.length === 1) {
-                unknowns[0].role = 'name';
-                unknowns[0].confidence = Math.max(
-                    0.5, unknowns[0].confidence);
-            } else if (unknowns.length > 1) {
-                // несколько — первый видимый берём как name
-                unknowns[0].role = 'name';
-                unknowns[0].confidence = Math.max(
-                    0.5, unknowns[0].confidence);
+                f => f.role === 'text_unknown' && f.visible
+                    && f.tag !== 'textarea'
+                    && f.type !== 'email' && f.type !== 'tel');
+            let pick = unknowns.find(f => f.name_hint);
+            if (!pick) pick = unknowns.find(f => f.tilda_input);
+            if (!pick && unknowns.length >= 1) pick = unknowns[0];
+            if (pick) {
+                pick.role = 'name';
+                pick.confidence = Math.max(0.5, pick.confidence);
             }
         }
 
@@ -799,6 +802,23 @@ FORM_EXTRACTOR_JS = r"""() => {
                 validation: extractValidation(el),
                 mask: extractMask(el, cls.signals),
             };
+
+            // Tilda / name-хинты для rationalize (задача P1-5):
+            // у Tilda-инпута имени часто нет обычного name-атрибута,
+            // но есть data-tilda-rule/-req или placeholder/label «имя».
+            const _nameBag = [
+                fld.name, fld.id, fld.placeholder, fld.label,
+                (el.getAttribute('data-tilda-rule') || ''),
+                (el.getAttribute('data-tilda-fieldname') || ''),
+            ].join(' ').toLowerCase();
+            fld.name_hint = /\bимя\b|\bимени\b|\bname\b|\bфио\b|\bфамили|как вас зовут|как к вам обращаться|ваше имя/
+                .test(_nameBag);
+            fld.tilda_input = (
+                el.hasAttribute('data-tilda-rule')
+                || el.hasAttribute('data-tilda-req')
+                || /t-input(?!-phonemask)/i.test(
+                    (el.className || '').toString()));
+
             if (el.tagName === 'SELECT') {
                 fld.options = Array.from(el.options).slice(0, 8)
                     .map(o => ({
@@ -1014,6 +1034,82 @@ FORM_EXTRACTOR_JS = r"""() => {
                 if (data) return data;
             }
         }
+    }
+
+    // ── Strategy 5 (последний шанс, P2-7) ────────────
+    // Форма с CTA-кнопкой, но телефон НЕ распознан ни одной
+    // стратегией. Принимаем форму, если есть name|email|textarea,
+    // а телефон вводим в первый tel/numeric/пустой text-инпут формы.
+    // Приоритет НИЖЕ всех точных стратегий — только чтобы не терять
+    // формы вроде esteticart, где tel-поле не детектится.
+    const ctaRe = /заказать звонок|перезвон|callback|записаться|\bзапись\b|оставить заявк|\bзаявк|консультац/i;
+    for (const form of document.querySelectorAll('form')) {
+        if (isSearchForm(form)) continue;
+        const sub = findSubmit(form);
+        const btnText = sub.el
+            ? ((sub.el.innerText || sub.el.value || '') + '')
+                .toLowerCase()
+            : '';
+        const formText = (form.innerText || '')
+            .toLowerCase().slice(0, 400);
+        if (!ctaRe.test(btnText) && !ctaRe.test(formText)) continue;
+        const raw = extractContainer(form);
+        if (!raw.fields.length) continue;
+        const hasNameOrEmail = raw.fields.some(
+            f => ['name','firstname','lastname','email']
+                .includes(f.role));
+        const hasTextarea = raw.fields.some(
+            f => f.tag === 'textarea');
+        if (!hasNameOrEmail && !hasTextarea) continue;
+        showHidden(form);
+        const data = finalize(raw, form, 'cta_no_phone');
+        if (!data) continue;
+        // Телефон не распознан → назначаем «куда вводить» и добавляем
+        // синтетическое phone-поле, чтобы build_smart_plan заполнил его.
+        if (!hasPhoneField(data)) {
+            const usedSel = new Set(data.fields.filter(
+                f => ['name','firstname','lastname','email',
+                    'comment','date'].includes(f.role))
+                .map(f => f.selector));
+            let phoneTarget = form.querySelector(
+                'input[type="tel"],input[inputmode="numeric"]');
+            if (!phoneTarget) {
+                for (const inp of form.querySelectorAll(
+                    'input[type="text"],input:not([type])')) {
+                    if (!isVisible(inp)) continue;
+                    if ((inp.value || '').trim()) continue;
+                    const s = buildSelector(inp);
+                    if (s && usedSel.has(s)) continue;
+                    phoneTarget = inp; break;
+                }
+            }
+            if (phoneTarget) {
+                const psel = buildSelector(phoneTarget);
+                if (psel) {
+                    data.fields.unshift({
+                        tag: phoneTarget.tagName.toLowerCase(),
+                        type: (phoneTarget.type || '').toLowerCase(),
+                        name: phoneTarget.name || '',
+                        id: phoneTarget.id || '',
+                        placeholder: (
+                            phoneTarget.placeholder || '').trim(),
+                        label: getLabel(phoneTarget),
+                        role: 'phone',
+                        confidence: 0.4,
+                        alternatives: [],
+                        visible: isVisible(phoneTarget),
+                        required: false,
+                        selector: psel,
+                        priority: 0,
+                        validation: null,
+                        mask: null,
+                        phone_fallback: true,
+                    });
+                    data.phone_fallback_hint = psel;
+                }
+            }
+        }
+        return data;
     }
 
     return null;

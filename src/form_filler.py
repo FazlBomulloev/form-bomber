@@ -2,6 +2,7 @@ import asyncio
 import re
 import time
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 from config import PHONE_FALLBACKS
 from logger import get_logger
@@ -509,7 +510,13 @@ async def smart_phone_fill(
             "el => el.value || ''", el
         ) or ""
         digits = re.sub(r'[^\d]', '', final)
-        ok = len(digits) >= 10
+        # Верификация СРАВНЕНИЕМ значения, не длины
+        ok = digits[-10:] == phone_short
+        if not ok and log:
+            log.warn(
+                f"phone(tilda) mismatch: got "
+                f"{digits[-10:]!r} != {phone_short!r}"
+            )
 
         if not ok:
             # retry: маска с иностранным кодом —
@@ -581,7 +588,7 @@ async def smart_phone_fill(
                         digits = re.sub(
                             r'[^\d]', '', final
                         )
-                        ok = len(digits) >= 10
+                        ok = digits[-10:] == phone_short
 
         if log:
             log.log_action(
@@ -599,8 +606,42 @@ async def smart_phone_fill(
     has_foreign_code = bool(re.search(
         r'^\+(?!7)\d{1,3}', cur.strip()
     ))
+    # Доп. детект маски по placeholder/классу/атрибутам:
+    # cur может быть пуст (маска вставляет код только по
+    # focus), тогда прежний снимок prefill ловил гонку и
+    # ошибочно выбирал phone7 → двойной +7.
+    mask_hint = False
+    try:
+        mask_hint = bool(await page.evaluate(r"""el => {
+            try {
+                const ph = (el.placeholder || '');
+                // только шаблоны маски (подчёркивания,
+                // скобка+подчёрк/цифры), НЕ голый "+7"
+                if (/[_]{2,}|\(\s*_|\(\s*\d{3}/.test(ph))
+                    return true;
+                const cls = (
+                    el.className || ''
+                ).toLowerCase();
+                if (/mask|phonemask|iti__|intl-tel/
+                    .test(cls))
+                    return true;
+                for (const a of [
+                    'data-mask',
+                    'data-phonemask-code',
+                    'data-tel-input',
+                    'data-inputmask',
+                ]) if (el.getAttribute(a)) return true;
+                return false;
+            } catch (e) { return false; }
+        }""", el))
+    except Exception:
+        mask_hint = False
+    masked = has_mask or has_foreign_code or mask_hint
+    # Для полей с маской ретраи печатают ТОЛЬКО phone_short
+    # (маска сама добавит +7); для полей без маски — phone7.
+    retry_val = phone_short if masked else phone7
 
-    if has_mask or has_foreign_code:
+    if masked:
         try:
             await page.evaluate(r"""el => {
                 const proto =
@@ -703,7 +744,7 @@ async def smart_phone_fill(
             except Exception:
                 pass
         await asyncio.sleep(0.15)
-        await _slow_type(page, el, phone7, 70)
+        await _slow_type(page, el, retry_val, 70)
         await asyncio.sleep(0.2)
         final = await page.evaluate(
             "el => el.value || ''", el,
@@ -713,7 +754,7 @@ async def smart_phone_fill(
     if len(digits) < 10:
         try:
             await react_patch_input(
-                page, el, phone7,
+                page, el, retry_val,
             )
             await asyncio.sleep(0.2)
             final = await page.evaluate(
@@ -741,13 +782,79 @@ async def smart_phone_fill(
         except Exception:
             pass
 
-    ok = len(digits) >= 10
+    # Верификация СРАВНЕНИЕМ значения, а не длины:
+    # битые вводы (двойной +7, сдвиг цифр) имеют >=10
+    # цифр, но не совпадают с ожидаемым номером.
+    got = re.sub(r'\D', '', final)
+    ok = got[-10:] == phone_short
+    if not ok and log:
+        log.warn(
+            f"phone value mismatch: got "
+            f"{got[-10:]!r} != {phone_short!r} "
+            f"(raw {final[:30]!r})"
+        )
+
+    # Не совпало → жёсткий сброс поля (native setter)
+    # и повторный ввод ТОЛЬКО phone_short (без ведущего
+    # +7 — маска сама добавит код), пауза после focus,
+    # чтобы маска инициализировалась; до 2 повторов.
+    retries = 0
+    while not ok and retries < 2:
+        retries += 1
+        try:
+            await page.evaluate(r"""el => {
+                const proto =
+                    HTMLInputElement.prototype;
+                const desc =
+                    Object.getOwnPropertyDescriptor(
+                        proto, 'value'
+                    );
+                if (desc && desc.set)
+                    desc.set.call(el, '');
+                else el.value = '';
+                el.dispatchEvent(new Event(
+                    'input', {bubbles: true}
+                ));
+                el.dispatchEvent(new Event(
+                    'change', {bubbles: true}
+                ));
+            }""", el)
+        except Exception:
+            try:
+                await el.fill("")
+            except Exception:
+                pass
+        try:
+            await el.click(timeout=1000)
+        except Exception:
+            try:
+                await page.evaluate(
+                    "el => el.focus()", el,
+                )
+            except Exception:
+                pass
+        await asyncio.sleep(0.18)
+        await _slow_type(
+            page, el, phone_short, 80,
+        )
+        await asyncio.sleep(0.3)
+        final = await page.evaluate(
+            "el => el.value || ''", el,
+        ) or ""
+        got = re.sub(r'\D', '', final)
+        ok = got[-10:] == phone_short
+        if not ok and log:
+            log.warn(
+                f"phone retry #{retries} mismatch: "
+                f"got {got[-10:]!r} != {phone_short!r}"
+            )
+
     if log:
         log.log_action(
             "phone", sel, final[:30],
             success=ok,
             error="" if ok
-            else f"только {len(digits)} цифр",
+            else f"value mismatch got={got[-10:]}",
         )
     return ok
 
@@ -1188,6 +1295,138 @@ async def _heuristic_fill_phone(
     return False
 
 
+async def _fill_required_empty(
+    page, form_el, phone,
+    firstname, lastname, patronymic,
+    email, comment,
+    honeypots=None,
+):
+    """ПРЕД-submit проход: дозаполняет ВИДИМЫЕ
+    [required]/:invalid пустые поля в пределах form_el по
+    роли. Нужен чтобы submit не уходил с пустым
+    обязательным полем (напр. «Имя»)."""
+    log = get_logger()
+    honeypot_set = set(honeypots or [])
+    try:
+        reqs = await page.evaluate(r"""root => {
+            const scope = root || document;
+            const out = [];
+            const isShown = (el) => {
+                try {
+                    const st = getComputedStyle(el);
+                    if (st.display === 'none'
+                        || st.visibility === 'hidden')
+                        return false;
+                    const r =
+                        el.getBoundingClientRect();
+                    return r.width > 6 && r.height > 6;
+                } catch(e) { return false; }
+            };
+            for (const el of scope.querySelectorAll(
+                'input:not([type="hidden"])'
+                + ':not([type="submit"])'
+                + ':not([type="button"])'
+                + ':not([type="checkbox"])'
+                + ':not([type="radio"]),'
+                + 'textarea'
+            )) {
+                if (!isShown(el)) continue;
+                const req = el.required
+                    || el.getAttribute(
+                        'aria-required') === 'true';
+                let invalid = false;
+                try {
+                    invalid = el.matches(':invalid');
+                } catch(e) {}
+                if (!req && !invalid) continue;
+                if ((el.value || '').trim()) continue;
+                const tp = (el.type || '')
+                    .toLowerCase();
+                const nm = (el.name || '')
+                    .toLowerCase();
+                const ph = (el.placeholder || '')
+                    .toLowerCase();
+                const tag = el.tagName.toLowerCase();
+                let sel = null;
+                if (el.id) sel = '#' + el.id;
+                else if (el.name)
+                    sel = tag
+                        + '[name="'+el.name+'"]';
+                else if (el.placeholder)
+                    sel = tag
+                        + '[placeholder="'
+                        + el.placeholder + '"]';
+                if (!sel) continue;
+                let role = 'name';
+                if (tp === 'tel'
+                    || /phone|tel|телефон/.test(
+                        nm + ' ' + ph))
+                    role = 'phone';
+                else if (tp === 'email'
+                    || /email|почт/.test(nm + ' ' + ph))
+                    role = 'email';
+                else if (tag === 'textarea'
+                    || /comment|сообщ|вопрос/.test(
+                        nm + ' ' + ph))
+                    role = 'comment';
+                out.push({sel, role});
+            }
+            return out;
+        }""", form_el)
+    except Exception:
+        return 0
+
+    if honeypot_set:
+        reqs = [
+            f for f in (reqs or [])
+            if f.get("sel") not in honeypot_set
+        ]
+
+    fixed = 0
+    for f in (reqs or []):
+        sel = f["sel"]
+        role = f["role"]
+        try:
+            if role == "phone":
+                ok = await smart_phone_fill(
+                    page, sel, phone, form_el,
+                )
+            elif role == "email":
+                ok = await _fill_field(
+                    page, sel, email, "email",
+                )
+            elif role == "comment":
+                ok = await _fill_field(
+                    page, sel, comment, "comment",
+                )
+            else:
+                need_fio = await _check_need_fio(
+                    page, sel,
+                )
+                if need_fio:
+                    val = " ".join(
+                        p for p in [
+                            lastname, firstname,
+                            patronymic,
+                        ] if p
+                    )
+                else:
+                    val = firstname
+                ok = await _fill_field(
+                    page, sel, val, "name",
+                )
+            if ok:
+                fixed += 1
+        except Exception:
+            continue
+    if log and fixed:
+        log.ok(
+            f"дозаполнено обязательных пустых "
+            f"(пред-submit): {fixed}"
+        )
+    return fixed
+
+
 async def execute_action_plan(
     page, actions, phone,
     firstname, lastname, patronymic,
@@ -1366,6 +1605,17 @@ async def execute_action_plan(
         filled.append(f"дата ×{date_count} (авто)")
 
     await _check_all_consent_boxes(page, form_el)
+
+    # ПРЕД-submit проход по обязательным пустым полям,
+    # чтобы submit не ушёл без required (напр. «Имя»).
+    req_fixed = await _fill_required_empty(
+        page, form_el, phone,
+        firstname, lastname, patronymic,
+        email, comment,
+        honeypots=list(honeypot_set),
+    )
+    if req_fixed:
+        filled.append(f"обязательные ×{req_fixed}")
 
     await step_shot(
         page, "before_submit", step_dir,
@@ -1838,6 +2088,175 @@ async def _fix_invalid_fields(
     return fixed
 
 
+_ANALYTICS_HOSTS = (
+    "google-analytics", "googletagmanager",
+    "mc.yandex", "yandex.ru/watch", "mixpanel",
+    "facebook.com/tr", "doubleclick", "/collect",
+    "hotjar", "criteo", "vk.com/rtrg",
+    "top-fwz1.mail.ru", "/analytics", "/gtm",
+)
+
+
+def _norm_host(url):
+    try:
+        h = urlparse(url).netloc.lower()
+        if h.startswith("www."):
+            h = h[4:]
+        return h
+    except Exception:
+        return ""
+
+
+def _make_submit_predicate(origin_host):
+    """POST/PUT/PATCH same-origin, не аналитический —
+    сильный сигнал того, что форменный запрос ушёл."""
+    def pred(resp):
+        try:
+            req = resp.request
+            if req.method not in (
+                "POST", "PUT", "PATCH",
+            ):
+                return False
+            url = resp.url
+            host = _norm_host(url)
+            if origin_host and host:
+                same = (
+                    host == origin_host
+                    or host.endswith("." + origin_host)
+                    or origin_host.endswith("." + host)
+                )
+                if not same:
+                    return False
+            low = url.lower()
+            if any(a in low for a in _ANALYTICS_HOSTS):
+                return False
+            return True
+        except Exception:
+            return False
+    return pred
+
+
+async def _click_form_submit(page, form_el):
+    """Приоритезированный клик по submit-кнопке ВНУТРИ
+    формы: реальные submit-типы и .sbut раньше, чем
+    generic button:not([type]) (кейс kalipsso)."""
+    if not form_el:
+        return None
+    prio = [
+        'button[type="submit"]',
+        'input[type="submit"]',
+        '.sbut',
+        '[class*="submit" i]',
+        'button:not([type])',
+        'button',
+    ]
+    for sel in prio:
+        try:
+            btn = await form_el.query_selector(sel)
+            if btn and await btn.is_visible():
+                await smart_click(
+                    page, btn, aggressive=True,
+                )
+                return sel
+        except Exception:
+            continue
+    return None
+
+
+async def _escalate_submit(page, form_el, pred):
+    """Эскалация при 0 POST после основного клика:
+    (1) submit-кнопка внутри формы, (2) requestSubmit(),
+    (3) dispatch 'submit', (4) Enter в поле телефона.
+    Логирует по какому селектору реально кликнули."""
+    log = get_logger()
+    resp_task = None
+    try:
+        resp_task = asyncio.ensure_future(
+            page.wait_for_response(pred, timeout=8000)
+        )
+        await asyncio.sleep(0)
+    except Exception:
+        resp_task = None
+
+    used = []
+
+    clicked_sel = await _click_form_submit(page, form_el)
+    if clicked_sel:
+        used.append(f"btn:{clicked_sel}")
+    await asyncio.sleep(0.8)
+
+    done = resp_task is not None and resp_task.done()
+    if not done and form_el:
+        try:
+            await page.evaluate(
+                r"f => { try { f.requestSubmit"
+                r" && f.requestSubmit(); }"
+                r" catch(e) {} }",
+                form_el,
+            )
+            used.append("requestSubmit")
+        except Exception:
+            pass
+        await asyncio.sleep(0.8)
+        done = resp_task is not None and resp_task.done()
+
+    if not done and form_el:
+        try:
+            await page.evaluate(
+                r"f => { try { f.dispatchEvent("
+                r"new Event('submit', {bubbles:true,"
+                r"cancelable:true})); } catch(e) {} }",
+                form_el,
+            )
+            used.append("dispatch_submit")
+        except Exception:
+            pass
+        await asyncio.sleep(0.8)
+        done = resp_task is not None and resp_task.done()
+
+    if not done:
+        for s in PHONE_FALLBACKS:
+            try:
+                scope = form_el or page
+                ph_el = await scope.query_selector(s)
+                if ph_el and await ph_el.is_visible():
+                    await ph_el.press("Enter")
+                    used.append("enter_phone")
+                    break
+            except Exception:
+                continue
+        await asyncio.sleep(0.5)
+
+    resp = None
+    if resp_task is not None:
+        if resp_task.done():
+            try:
+                resp = resp_task.result()
+            except Exception:
+                resp = None
+        else:
+            try:
+                resp = await asyncio.wait_for(
+                    asyncio.shield(resp_task),
+                    timeout=1.5,
+                )
+            except Exception:
+                resp = None
+            if not resp_task.done():
+                resp_task.cancel()
+
+    if log and used:
+        log.step(
+            "escalate_submit",
+            "методы: " + ", ".join(used)
+            + (
+                " | форменный POST пойман"
+                if resp else " | POST не пойман"
+            ),
+        )
+    return resp
+
+
 async def submit_with_retry(
     page, submit_sel, form_el,
     phone, firstname, lastname,
@@ -1866,6 +2285,8 @@ async def submit_with_retry(
     )
     pre_url = page.url
     prev_err_match = None
+    origin_host = _norm_host(pre_url)
+    submit_pred = _make_submit_predicate(origin_host)
 
     for attempt in range(1, max_submits + 1):
         if log:
@@ -1875,11 +2296,55 @@ async def submit_with_retry(
             )
         net_listener.clear()
         await setup_xhr_listener(page)
+
+        # P0-2: промис на форменный ответ ставим ДО клика,
+        # иначе быстрый AJAX между снимками DOM теряется.
+        resp_task = None
+        try:
+            resp_task = asyncio.ensure_future(
+                page.wait_for_response(
+                    submit_pred, timeout=12000,
+                )
+            )
+            await asyncio.sleep(0)
+        except Exception:
+            resp_task = None
+
         submitted = await do_submit(
             page, submit_sel, form_el,
         )
         if not submitted:
+            if resp_task is not None \
+                    and not resp_task.done():
+                resp_task.cancel()
             return {"state": "submit_failed"}
+
+        # do_submit уже подождал ~3.5с: быстрый ответ к
+        # этому моменту либо пойман, либо даём короткую
+        # фору, не блокируясь на полный таймаут.
+        form_post_resp = None
+        if resp_task is not None:
+            if resp_task.done():
+                try:
+                    form_post_resp = resp_task.result()
+                except Exception:
+                    form_post_resp = None
+            else:
+                try:
+                    form_post_resp = await asyncio.wait_for(
+                        asyncio.shield(resp_task),
+                        timeout=1.5,
+                    )
+                except Exception:
+                    form_post_resp = None
+                if not resp_task.done():
+                    resp_task.cancel()
+        post_status = None
+        if form_post_resp is not None:
+            try:
+                post_status = form_post_resp.status
+            except Exception:
+                post_status = None
 
         await step_shot(
             shot_page,
@@ -1928,6 +2393,26 @@ async def submit_with_retry(
                     state = s2
                     break
 
+        # P0-2: пойманный форменный POST с 2xx/3xx —
+        # сильный сигнал успеха, если DOM ничего не понял.
+        net_post_ok = (
+            post_status is not None
+            and 200 <= post_status < 400
+        )
+        if net_post_ok and state in (
+            "unchanged", "likely_failed",
+        ):
+            if log:
+                log.ok(
+                    f"форменный POST {post_status} "
+                    f"пойман → likely_success"
+                )
+            state = "likely_success"
+            dom["state"] = "likely_success"
+            dom.setdefault(
+                "match", f"form POST {post_status}",
+            )
+
         if state == "likely_success":
             state = "success"
             dom["state"] = "success"
@@ -1942,6 +2427,52 @@ async def submit_with_retry(
 
         if state == "success":
             return dom
+
+        # P1-6: 0 форменных POST после основного клика
+        # (kalipsso: кликнули не ту кнопку) → эскалация.
+        if (
+            form_post_resp is None
+            and state == "unchanged"
+        ):
+            esc_resp = await _escalate_submit(
+                page, form_el, submit_pred,
+            )
+            if esc_resp is not None:
+                await asyncio.sleep(2.0)
+                try:
+                    dom_e = (
+                        await detect_submission_result(
+                            page, form_el, pre_text,
+                            url_changed=(
+                                pre_url.rstrip("/")
+                                != page.url.rstrip("/")
+                            ),
+                            net_listener=net_listener,
+                        )
+                    )
+                except Exception:
+                    dom_e = {"state": "unchanged"}
+                se = dom_e.get("state", "unchanged")
+                try:
+                    est = esc_resp.status
+                except Exception:
+                    est = None
+                if se in ("success", "likely_success") or (
+                    est is not None
+                    and 200 <= est < 400
+                    and se in ("unchanged", "likely_failed")
+                ):
+                    dom_e["state"] = "success"
+                    dom_e.setdefault(
+                        "match",
+                        f"escalated POST {est}",
+                    )
+                    return dom_e
+                if se not in (
+                    "unchanged", "likely_failed",
+                ):
+                    dom = dom_e
+                    state = se
 
         # Проверка капчи после submit (на любой попытке).
         # Не решаем капчу заново, если submit упал в ту же

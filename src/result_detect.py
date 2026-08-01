@@ -79,6 +79,23 @@ SKIP_URL_PATTERN = (
     r"|doubleclick|facebook\.com/(tr|events)|hotjar"
     r"|gtag|collect\?|\.gif\?|fonts\.|\.css\?|\.js\?"
     r"|favicon|\.png|\.jpg|\.svg|\.woff"
+    r"|top-fwz1\.mail\.ru|vk\.com/rtrg|/batch\b"
+)
+# Аналитические goal-эндпоинты (calltouch, метрика):
+# слабый сигнал, а не ошибка. calltouch НЕ в SKIP,
+# чтобы можно было использовать как weak-success.
+GOAL_URL_PATTERN = (
+    r"calltouch|auto_goal_event|set_external_data"
+    r"|reachgoal|/goal(\b|_|/)|/watch\b"
+)
+# URL-редиректа/страницы, выглядящие как успех/провал.
+OK_URL_PATTERN = (
+    r"thank|success|spasibo|thanks|готово|blagodar"
+    r"|принят|отправлен|#success|order.?success"
+    r"|formstatus|zayavka-prinyata"
+)
+FAIL_URL_PATTERN = (
+    r"error|fail|invalid|denied|reject"
 )
 
 _OK_RE = _re.compile(OK_PATTERN, _re.IGNORECASE)
@@ -98,6 +115,15 @@ _FORM_URL_RE = _re.compile(
 _SKIP_URL_RE = _re.compile(
     SKIP_URL_PATTERN, _re.IGNORECASE,
 )
+_GOAL_URL_RE = _re.compile(
+    GOAL_URL_PATTERN, _re.IGNORECASE,
+)
+_OK_URL_RE = _re.compile(
+    OK_URL_PATTERN, _re.IGNORECASE,
+)
+_FAIL_URL_RE = _re.compile(
+    FAIL_URL_PATTERN, _re.IGNORECASE,
+)
 
 
 def _looks_like_success(body: str) -> bool:
@@ -108,6 +134,25 @@ def _looks_like_success(body: str) -> bool:
     if _STRICT_ERR_RE.search(body) and not _STRONG_OK_RE.search(body):
         return False
     return bool(_OK_RE.search(body))
+
+
+def _url_host(u: str) -> str:
+    """Хост из URL (без схемы/порта), lower-case."""
+    if not u:
+        return ""
+    m = _re.match(r"[a-zA-Z][\w+.\-]*://([^/:?#]+)", u)
+    return (m.group(1) if m else "").lower()
+
+
+def _looks_success_url(loc: str) -> bool:
+    """URL редиректа выглядит как страница успеха?
+    (thank/success/spasibo/готово/#success…) и НЕ
+    содержит error/fail/invalid."""
+    if not loc:
+        return False
+    if _FAIL_URL_RE.search(loc):
+        return False
+    return bool(_OK_URL_RE.search(loc))
 
 
 def _js_re(pattern: str) -> str:
@@ -124,6 +169,7 @@ class PlaywrightNetworkListener:
     def __init__(self, phone=""):
         self._raw = []
         self._handler = None
+        self._page_host = ""
         digits = _re.sub(r"\D", "", phone or "")
         self._phone_short = digits[-10:] if len(
             digits,
@@ -132,6 +178,10 @@ class PlaywrightNetworkListener:
     def start(self, page):
         self._raw.clear()
         log = _get_log()
+        try:
+            self._page_host = _url_host(page.url or "")
+        except Exception:
+            self._page_host = ""
 
         def _on_response(response):
             try:
@@ -199,6 +249,34 @@ class PlaywrightNetworkListener:
         digits = _re.sub(r"\D", "", decoded)
         return self._phone_short in digits
 
+    def _same_origin(self, url):
+        """URL с того же хоста, что и целевая страница
+        (или его поддомен)? Нужно чтобы считать POST
+        «форменным» даже без телефона в теле."""
+        if not self._page_host:
+            return False
+        host = _url_host(url)
+        if not host:
+            return False
+        return (
+            host == self._page_host
+            or host.endswith("." + self._page_host)
+            or self._page_host.endswith("." + host)
+        )
+
+    def _is_form_post(self, url, post_data):
+        """«Форменный» POST: наш телефон, form-подобный
+        url ИЛИ same-origin (и не аналитика/цель).
+        Расширяет пометку за пределы точного совпадения
+        телефона (Tilda/multipart дробят номер)."""
+        if _GOAL_URL_RE.search(url):
+            return False
+        if self._is_our_request(post_data):
+            return True
+        if _FORM_URL_RE.search(url):
+            return True
+        return self._same_origin(url)
+
     async def check_result(self):
         """Анализирует перехваченные POST-ответы.
         Приоритет: запросы с нашим телефоном."""
@@ -216,6 +294,18 @@ class PlaywrightNetworkListener:
 
         our_result = None
         other_result = None
+
+        # P2: был ли в этой сессии наш форменный POST
+        # 2xx/3xx — тогда аналитическую goal-цель можно
+        # трактовать как слабый success.
+        had_form_post = False
+        for e in self._raw:
+            st = e["status"]
+            if 200 <= st < 400 and self._is_form_post(
+                e["url"], e["post_data"],
+            ):
+                had_form_post = True
+                break
 
         for entry in reversed(self._raw):
             resp = entry["resp"]
@@ -260,6 +350,12 @@ class PlaywrightNetworkListener:
                 continue
 
             is_form_url = _FORM_URL_RE.search(url)
+            is_goal = bool(_GOAL_URL_RE.search(url))
+            # P0-2: «форменный» POST — телефон в теле,
+            # form-url ИЛИ same-origin (не аналитика).
+            is_form_post = self._is_form_post(
+                url, post_data,
+            )
 
             r = None
             body_stripped = body.strip()
@@ -268,7 +364,20 @@ class PlaywrightNetworkListener:
                 body and _STRICT_ERR_RE.search(body)
                 and not _STRONG_OK_RE.search(body)
             )
-            if 200 <= status < 300:
+            if is_goal:
+                # P2: аналитическая цель — слабый сигнал.
+                # likely_success только если уже был наш
+                # форменный POST; иначе НЕ ошибка и не
+                # перебиваем реальный сигнал (r=None).
+                if had_form_post and 200 <= status < 400:
+                    r = {
+                        "state": "likely_success",
+                        "match": (
+                            "NET goal after form POST: "
+                            + url[:45]
+                        ),
+                    }
+            elif 200 <= status < 300:
                 if strict_err:
                     r = {
                         "state": "error",
@@ -288,12 +397,37 @@ class PlaywrightNetworkListener:
                             "NET: " + body_stripped
                         ),
                     }
-                elif is_ours or is_form_url:
+                elif is_form_post:
                     r = {
                         "state": "likely_success",
                         "match": (
                             "NET POST 2xx: "
                             + url[:55]
+                        ),
+                    }
+            elif 300 <= status < 400:
+                # P0-1: PRG/302-редирект на нашем POST —
+                # гарантированный success у Drupal/Bitrix/
+                # PHP. Тело 3xx НЕ читаем (Playwright
+                # бросает); берём только location.
+                loc = ""
+                try:
+                    loc = (
+                        await resp.header_value(
+                            "location",
+                        )
+                    ) or ""
+                except Exception:
+                    pass
+                if (
+                    is_form_post
+                    or _looks_success_url(loc)
+                ):
+                    r = {
+                        "state": "likely_success",
+                        "match": (
+                            f"NET POST {status} "
+                            f"redirect: " + url[:50]
                         ),
                     }
             elif (
@@ -416,7 +550,11 @@ async def setup_xhr_listener(page):
             //    signal на этих платформах.
             window.__fbCmsSuccess = null;
             const cmsEvents = [
-                'wpcf7mailsent', 'wpcf7submit',
+                // ВАЖНО: только wpcf7mailsent = «письмо
+                // отправлено». wpcf7submit летит на ЛЮБОЙ
+                // сабмит (в т.ч. невалидный/спам) и раньше
+                // wpcf7invalid → ложный успех. Не включать.
+                'wpcf7mailsent',
                 'tildaformsubmit', 'tildaform.success',
                 'bxFormSuccess', 'b24:form:submit',
                 'jivo:webhook',

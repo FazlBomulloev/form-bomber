@@ -2,17 +2,53 @@
 Включает очистку HTML и сбор iframe-контента."""
 
 import json
+import os
 import re
 import time
 import requests as _requests
 
-CLAUDE_URL = "https://api.oneprovider.dev/v1/messages"
-CLAUDE_MODEL = "claude-sonnet-4-6"
+# .env подхватываем и здесь (идемпотентно, как в auth.py) — чтобы
+# os.getenv видел значения независимо от порядка импортов модулей.
+try:
+    from pathlib import Path as _Path
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(_Path(__file__).resolve().parent.parent / ".env")
+except Exception:
+    pass
 
-DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
-DEEPSEEK_MODEL = "deepseek-v4-flash"
+try:
+    from logger import get_logger as _get_logger
+except Exception:  # логгер не обязателен для работы провайдера
+    _get_logger = None
+
+
+# Endpoint/модель/ключ каждого провайдера настраиваются через окружение.
+# Дефолты — текущие рабочие значения (прокси). Владелец может указать,
+# например, прямой Anthropic API:
+#   CLAUDE_URL=https://api.anthropic.com/v1/messages
+#   CLAUDE_MODEL=claude-sonnet-4-5
+#   CLAUDE_API_KEY=sk-ant-...
+CLAUDE_URL = os.getenv(
+    "CLAUDE_URL", "https://api.oneprovider.dev/v1/messages")
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+
+DEEPSEEK_URL = os.getenv(
+    "DEEPSEEK_URL", "https://api.deepseek.com/chat/completions")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
 AI_PROVIDERS = ("claude", "deepseek")
+
+
+def _env_key(provider: str) -> str:
+    """Ключ провайдера из окружения (для fallback-провайдера, когда
+    пользовательский ключ передан только для основного). Для claude
+    принимаем и CLAUDE_API_KEY, и стандартный ANTHROPIC_API_KEY."""
+    if provider == "claude":
+        return (os.getenv("CLAUDE_API_KEY", "")
+                or os.getenv("ANTHROPIC_API_KEY", ""))
+    if provider == "deepseek":
+        return os.getenv("DEEPSEEK_API_KEY", "")
+    return ""
 
 _SYSTEM = "Верни ТОЛЬКО JSON. Без markdown и текста."
 
@@ -336,10 +372,40 @@ def _extract_deepseek(data):
     return content, tokens
 
 
+def _dispatch(provider, prompt, api_key):
+    """Один вызов конкретного провайдера → (content, tokens)."""
+    if provider == "deepseek":
+        data = _retry(
+            _deepseek_call, prompt, _SYSTEM, api_key,
+        )
+        return _extract_deepseek(data)
+    data = _retry(
+        _claude_call, prompt, _SYSTEM, api_key,
+    )
+    return _extract_claude(data)
+
+
+def _log_warn(msg, **kw):
+    if not _get_logger:
+        return
+    try:
+        lg = _get_logger()
+        if lg:
+            lg.warn(msg, **kw)
+    except Exception:
+        pass
+
+
 def ask_ai_sync(page_html, url, api_key, provider="claude"):
     """Принимает сырой HTML, чистит, отправляет в выбранный AI.
     Возвращает (result_dict, tokens, provider).
-    При ошибке парсинга кидает AIParseError с raw_text."""
+
+    Отказоустойчивость: если основной провайдер падает (403/таймаут/
+    битый JSON), пробуем следующего из AI_PROVIDERS. Ключ основного
+    провайдера — переданный api_key (или env), ключ fallback-провайдера
+    берётся из окружения (_env_key). При исчерпании всех провайдеров
+    поднимаем последнюю ошибку (AIParseError сохраняет raw_text/tokens
+    для разбора в runner)."""
     cleaned = clean_html(page_html)
     prompt = _PROMPT.replace("%%HTML%%", cleaned)
 
@@ -348,28 +414,68 @@ def ask_ai_sync(page_html, url, api_key, provider="claude"):
         raise RuntimeError(
             f"Неизвестный AI-провайдер: {provider}"
         )
-    if not api_key:
+
+    # Порядок: запрошенный провайдер первым, затем остальные (fallback).
+    order = [provider] + [
+        p for p in AI_PROVIDERS if p != provider
+    ]
+
+    total_tokens = 0
+    last_exc = None
+    tried_any = False
+
+    for prov in order:
+        # основной провайдер использует переданный ключ (или env),
+        # fallback-провайдер — только env-ключ.
+        key = api_key if prov == provider else ""
+        if not key:
+            key = _env_key(prov)
+        if not key:
+            last_exc = last_exc or RuntimeError(
+                f"{prov} API ключ не указан"
+            )
+            _log_warn(f"AI:{prov} пропущен — нет ключа")
+            continue
+
+        tried_any = True
+        try:
+            content, tokens = _dispatch(prov, prompt, key)
+            total_tokens += tokens
+        except Exception as e:
+            total_tokens += getattr(e, "tokens", 0)
+            last_exc = e
+            _log_warn(
+                f"AI:{prov} ошибка вызова → "
+                f"следующий провайдер",
+                err=str(e)[:160],
+            )
+            continue
+
+        try:
+            parsed = _parse(content)
+        except AIParseError as e:
+            e.tokens = total_tokens
+            last_exc = e
+            _log_warn(
+                f"AI:{prov} битый JSON → "
+                f"следующий провайдер",
+                err=str(e)[:160],
+            )
+            continue
+
+        return parsed, total_tokens, prov
+
+    # Все провайдеры исчерпаны.
+    if not tried_any:
         raise RuntimeError(
             f"{provider} API ключ не указан"
         )
-
-    if provider == "deepseek":
-        data = _retry(
-            _deepseek_call, prompt, _SYSTEM, api_key,
-        )
-        content, tokens = _extract_deepseek(data)
-    else:
-        data = _retry(
-            _claude_call, prompt, _SYSTEM, api_key,
-        )
-        content, tokens = _extract_claude(data)
-
-    try:
-        parsed = _parse(content)
-    except AIParseError as e:
-        e.tokens = tokens
-        raise
-    return parsed, tokens, provider
+    if isinstance(last_exc, AIParseError):
+        last_exc.tokens = total_tokens
+        raise last_exc
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("AI: все провайдеры недоступны")
 
 
 async def collect_full_html(page):
