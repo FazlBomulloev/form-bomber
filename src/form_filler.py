@@ -285,17 +285,19 @@ async def _select_country_code_7(page, phone_el):
                 if (typeof
                     t_form_phonemask__handleUpdateCountry
                         === 'function') {
-                    t_form_phonemask__handleUpdateCountry(
-                        pm, {
-                            code: '+7',
-                            mask: '+7(000) 000-00-00',
-                            iso: 'ru',
-                            silent: false,
-                            noFocus: false
-                        }
-                    );
-                    el.value = '';
-                    return 'tilda_api:+7';
+                    try {
+                        t_form_phonemask__handleUpdateCountry(
+                            pm, {
+                                code: '+7',
+                                mask: '+7(000) 000-00-00',
+                                iso: 'ru',
+                                silent: false,
+                                noFocus: false
+                            }
+                        );
+                        el.value = '';
+                        return 'tilda_api:+7';
+                    } catch (e) { /* fallthrough */ }
                 }
                 // fallback: клик на флаг + выбор RU
                 const flagEl = pm.querySelector(

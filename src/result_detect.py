@@ -418,7 +418,7 @@ class PlaywrightNetworkListener:
                     f"{result['match'][:60]}",
                 )
             else:
-                log.warn("net_result: None")
+                log.step("net_result", "None")
         return result
 
 async def _fallback_detect(page, pre_text, url_changed):

@@ -1192,10 +1192,10 @@ async def extract_form_json(page) -> Optional[dict]:
         if result and result.get("fields"):
             return result
         if log := get_logger():
-            log.warn(
-                f"js_extractor: result="
-                f"{type(result).__name__}, "
-                f"fields={len((result or {}).get('fields', []))}"
+            log.step(
+                "js_extractor",
+                f"пусто: type={type(result).__name__} "
+                f"fields=0",
             )
     except Exception as e:
         if log := get_logger():

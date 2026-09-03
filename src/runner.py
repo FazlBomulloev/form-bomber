@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import shutil
 import time
 import uuid
@@ -184,6 +185,25 @@ def _profile_to_instructions(profile: dict) -> dict:
         "notes": "Из кеша профиля формы",
     }
 
+_UNSTABLE_SEL_RE = re.compile(
+    r"#(?:input_\d{10,}"
+    r"|tildafield_[a-z0-9]{6,}"
+    r"|tilda-[a-z0-9]{6,}"
+    r"|rec\d{8,}"
+    r"|el_\d{10,})",
+    re.I,
+)
+
+def _has_unstable_selectors(instructions: dict) -> bool:
+    for a in instructions.get("actions") or []:
+        sel = a.get("selector") or ""
+        if _UNSTABLE_SEL_RE.search(sel):
+            return True
+    fs = instructions.get("form_selector") or ""
+    if _UNSTABLE_SEL_RE.search(fs):
+        return True
+    return False
+
 async def _maybe_save_profile(
     domain: str, result: dict, instructions: dict,
 ):
@@ -195,6 +215,14 @@ async def _maybe_save_profile(
         return
     method = result.get("method", "")
     if not method.startswith("form_"):
+        return
+    if _has_unstable_selectors(instructions):
+        log = _site_logger_var.get(None)
+        if log:
+            log.warn(
+                f"profile_cache: пропуск {domain} — "
+                f"нестабильные Tilda-селекторы",
+            )
         return
     submit_sel = ""
     for a in instructions.get("actions") or []:
@@ -571,10 +599,43 @@ async def check_site_v2(
 
         try:
             _logger.step("navigate", url)
-            await page.goto(
-                url, wait_until="domcontentloaded",
-                timeout=30000,
-            )
+            _goto_try = 0
+            while True:
+                try:
+                    await page.goto(
+                        url, wait_until="domcontentloaded",
+                        timeout=30000,
+                    )
+                    break
+                except Exception as _ge:
+                    _goto_try += 1
+                    _msg = str(_ge)
+                    _crashed = (
+                        "Page crashed" in _msg
+                        or "TargetClosed" in _msg
+                        or "Target page, context or browser"
+                        in _msg
+                    )
+                    if _crashed and _goto_try < 2:
+                        _logger.warn(
+                            "page crashed на goto, "
+                            "пересоздаём контекст",
+                        )
+                        try:
+                            await ctx.close()
+                        except Exception:
+                            pass
+                        _active_contexts.discard(ctx)
+                        browser = await _get_browser()
+                        ctx = await browser.new_context(
+                            **ctx_kwargs,
+                        )
+                        await apply_stealth(ctx)
+                        _active_contexts.add(ctx)
+                        page = await ctx.new_page()
+                        await asyncio.sleep(1)
+                        continue
+                    raise
             await asyncio.sleep(2)
 
             try:
@@ -869,7 +930,7 @@ async def check_site_v2(
                         _logger.log_ai(
                             "", {}, err_tokens,
                             ai_provider,
-                            error=str(e)[:200],
+                            error=str(e)[:600],
                         )
                         ai_plan = None
 

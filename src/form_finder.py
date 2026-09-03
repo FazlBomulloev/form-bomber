@@ -92,7 +92,7 @@ async def _has_phone_visible(page) -> bool:
         return False
 
 async def _wait_form_after_trigger(
-    page, timeout=8000,
+    page, timeout=12000,
 ) -> bool:
     try:
         await page.wait_for_selector(
@@ -112,13 +112,41 @@ async def _wait_form_after_trigger(
     )
     try:
         await page.wait_for_selector(
-            modal_sels, timeout=2500,
+            modal_sels, timeout=3000,
             state="visible",
         )
         await asyncio.sleep(0.8)
-        return await _has_phone_visible(page)
+        if await _has_phone_visible(page):
+            return True
     except Exception:
-        return False
+        pass
+    try:
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            try:
+                found = await frame.evaluate(
+                    r"""(sels) => {
+                    for (const el of
+                        document.querySelectorAll(sels)) {
+                        const r = el.getBoundingClientRect();
+                        const st = getComputedStyle(el);
+                        if (r.width > 18 && r.height > 6
+                            && st.display !== 'none'
+                            && st.visibility !== 'hidden'
+                            && st.opacity !== '0')
+                            return true;
+                    }
+                    return false;
+                }""", _PHONE_WAIT_SELS,
+                )
+                if found:
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
 
 async def _is_widget_btn(el) -> bool:
     try:
@@ -589,6 +617,7 @@ async def _mutation_observer_retry(page):
     except Exception:
         pass
 
+    appeared_flag = False
     for _ in range(15):
         await asyncio.sleep(0.2)
         try:
@@ -596,6 +625,7 @@ async def _mutation_observer_retry(page):
                 "() => window.__fbFormAppeared",
             )
             if appeared:
+                appeared_flag = True
                 if log:
                     log.ok(
                         "MutationObserver: "
@@ -614,7 +644,13 @@ async def _mutation_observer_retry(page):
     except Exception:
         pass
 
+    if appeared_flag:
+        await asyncio.sleep(0.8)
+
     data = await extract_form_json(page)
+    if (not data or not data.get("fields")) and appeared_flag:
+        await asyncio.sleep(0.7)
+        data = await extract_form_json(page)
     return data
 
 _SEARCH_SUBMIT_RE = re.compile(

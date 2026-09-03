@@ -19,11 +19,11 @@ except Exception:
 
 CLAUDE_URL = os.getenv(
     "CLAUDE_URL", "https://api.oneprovider.dev/v1/messages")
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
 
 DEEPSEEK_URL = os.getenv(
     "DEEPSEEK_URL", "https://api.deepseek.com/chat/completions")
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
 DEFAULT_PROVIDER = os.getenv("AI_PROVIDER", "deepseek").lower()
 
@@ -287,11 +287,39 @@ def _parse(content):
         return _expand_ai_response(raw)
     return raw
 
+class AIHttpError(Exception):
+
+    def __init__(self, status: int, body: str, url: str):
+        self.status = status
+        self.body = body or ""
+        self.url = url
+        snippet = self.body.strip().replace("\n", " ")[:400]
+        super().__init__(
+            f"HTTP {status} {url} :: {snippet}"
+        )
+
+def _raise_for_http(resp, url):
+    if resp.status_code < 400:
+        return
+    body = ""
+    try:
+        body = resp.text or ""
+    except Exception:
+        body = ""
+    raise AIHttpError(resp.status_code, body, url)
+
 def _retry(fn, *args, retries=3, delay=4):
     last = None
     for i in range(retries):
         try:
             return fn(*args)
+        except AIHttpError as e:
+            last = e
+            if 400 <= e.status < 500 and e.status != 429:
+                raise
+            if i < retries - 1:
+                wait = delay * (2 ** i)
+                time.sleep(min(wait, 30))
         except Exception as e:
             last = e
             if i < retries - 1:
@@ -299,7 +327,11 @@ def _retry(fn, *args, retries=3, delay=4):
                 time.sleep(min(wait, 30))
     raise last
 
+_MAX_IMAGE_B64_BYTES = 4_500_000
+
 def _claude_call(prompt, system, api_key, screenshot_b64=None):
+    if screenshot_b64 and len(screenshot_b64) > _MAX_IMAGE_B64_BYTES:
+        screenshot_b64 = None
     if screenshot_b64:
         user_content = [
             {"type": "text", "text": prompt},
@@ -313,20 +345,22 @@ def _claude_call(prompt, system, api_key, screenshot_b64=None):
             },
         ]
     else:
-        user_content = prompt
+        user_content = [{"type": "text", "text": prompt}]
     sess = _requests.Session()
     sess.headers["Connection"] = "close"
     resp = sess.post(
         CLAUDE_URL,
         headers={
             "x-api-key": api_key,
+            "authorization": f"Bearer {api_key}",
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
+            "Accept": "application/json",
             "User-Agent": "curl/7.68.0",
         },
         json={
             "model": CLAUDE_MODEL,
-            "max_tokens": 600,
+            "max_tokens": 1024,
             "system": system,
             "messages": [
                 {"role": "user",
@@ -335,7 +369,7 @@ def _claude_call(prompt, system, api_key, screenshot_b64=None):
         },
         timeout=90,
     )
-    resp.raise_for_status()
+    _raise_for_http(resp, CLAUDE_URL)
     return resp.json()
 
 def _deepseek_call(prompt, system, api_key):
@@ -349,7 +383,7 @@ def _deepseek_call(prompt, system, api_key):
         },
         json={
             "model": DEEPSEEK_MODEL,
-            "max_tokens": 600,
+            "max_tokens": 1024,
             "temperature": 0,
             "response_format": {"type": "json_object"},
             "messages": [
@@ -359,7 +393,7 @@ def _deepseek_call(prompt, system, api_key):
         },
         timeout=90,
     )
-    resp.raise_for_status()
+    _raise_for_http(resp, DEEPSEEK_URL)
     return resp.json()
 
 def _extract_claude(data):
@@ -395,9 +429,21 @@ def _dispatch(provider, prompt, api_key, screenshot_b64=None):
         )
         return _extract_deepseek(data)
     shot = screenshot_b64 if is_vision_provider(provider) else None
-    data = _retry(
-        _claude_call, prompt, _SYSTEM, api_key, shot,
-    )
+    try:
+        data = _retry(
+            _claude_call, prompt, _SYSTEM, api_key, shot,
+        )
+    except AIHttpError as e:
+        if e.status == 400 and shot:
+            _log_warn(
+                "AI:claude 400 с картинкой — повтор без картинки",
+                body=e.body[:160],
+            )
+            data = _retry(
+                _claude_call, prompt, _SYSTEM, api_key, None,
+            )
+        else:
+            raise
     return _extract_claude(data)
 
 def _log_warn(msg, **kw):
