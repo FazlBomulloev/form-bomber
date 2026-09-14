@@ -17,6 +17,7 @@ data/
 # Служебные каталоги
 .claude/
 .playwright-mcp/
+.impeccable/hook.cache.json
 
 # ОС
 .DS_Store

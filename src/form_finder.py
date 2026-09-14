@@ -290,7 +290,6 @@ async def _aggressive_form_reveal(page):
         let found = 0;
         const formFunctions = [];
 
-        // 1. Force-show hidden <form> с полем телефона
         for (const form of
             document.querySelectorAll('form')) {
             const hasPhone = form.querySelector(
@@ -333,7 +332,6 @@ async def _aggressive_form_reveal(page):
             found++;
         }
 
-        // 2. Глобальные JS-функции открытия форм
         const pats = [
             /open.?form/i, /show.?form/i,
             /show.?popup/i, /open.?popup/i,
@@ -352,7 +350,6 @@ async def _aggressive_form_reveal(page):
             }
         }
 
-        // 3. Tilda-попапы
         const tPops = document.querySelectorAll(
             '[class*="t-popup"][data-tooltip-hook],'
             + '.t-popup'
@@ -370,7 +367,6 @@ async def _aggressive_form_reveal(page):
             } catch(e) {}
         }
 
-        // 4. Bitrix24 form containers
         const b24 = document.querySelectorAll(
             '[class*="b24-form" i],'
             + '[class*="bx-core-form" i]'
@@ -387,7 +383,6 @@ async def _aggressive_form_reveal(page):
             } catch(e) {}
         }
 
-        // 5. dispatchEvent на кнопки-триггеры
         const btnTexts = [
             'записаться','запись','консультац',
             'заказать звонок','обратный звонок',
@@ -413,7 +408,6 @@ async def _aggressive_form_reveal(page):
             } catch(e) {}
         }
 
-        // 6. Удаление overlay-блокеров (не-капча)
         for (const ov of document.querySelectorAll(
             '[class*="overlay" i],'
             + '[class*="backdrop" i]'

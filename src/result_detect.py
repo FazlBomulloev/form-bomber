@@ -1,5 +1,4 @@
 import html as _html
-import json as _json
 import re as _re
 from urllib.parse import unquote_plus as _unquote
 from config import SUCCESS_TEXTS, ERROR_PHRASES
@@ -128,9 +127,6 @@ def _looks_success_url(loc: str) -> bool:
     if _FAIL_URL_RE.search(loc):
         return False
     return bool(_OK_URL_RE.search(loc))
-
-def _js_re(pattern: str) -> str:
-    return _json.dumps(pattern)
 
 class PlaywrightNetworkListener:
 
@@ -481,15 +477,8 @@ async def setup_xhr_listener(page):
             window.__fbXHR = [];
             const MAX = 100;
 
-            // ── CMS events: WordPress (wpcf7), Tilda,
-            //    Bitrix24, Jivo и др. — самый сильный
-            //    signal на этих платформах.
             window.__fbCmsSuccess = null;
             const cmsEvents = [
-                // ВАЖНО: только wpcf7mailsent = «письмо
-                // отправлено». wpcf7submit летит на ЛЮБОЙ
-                // сабмит (в т.ч. невалидный/спам) и раньше
-                // wpcf7invalid → ложный успех. Не включать.
                 'wpcf7mailsent',
                 'tildaformsubmit', 'tildaform.success',
                 'bxFormSuccess', 'b24:form:submit',
@@ -522,7 +511,6 @@ async def setup_xhr_listener(page):
                 } catch(_) {}
             }
 
-            // ── Navigation API: SPA-роутинг после submit
             window.__fbNavSuccess = null;
             if (window.navigation
                 && navigation.addEventListener) {
@@ -549,7 +537,6 @@ async def setup_xhr_listener(page):
                     );
             };
 
-            // Patch fetch
             const _f = window.fetch;
             window.fetch = async function(...a) {
                 const r = await _f.apply(this, a);
@@ -568,7 +555,6 @@ async def setup_xhr_listener(page):
                 return r;
             };
 
-            // Patch XMLHttpRequest
             const _o = XMLHttpRequest.prototype.open;
             const _s = XMLHttpRequest.prototype.send;
             XMLHttpRequest.prototype.open =
@@ -602,7 +588,6 @@ async def check_xhr_result(page):
     try:
         return await page.evaluate(
             r"""(pats) => {
-            // ── Приоритет: CMS-события и Navigation API
             if (window.__fbCmsSuccess)
                 return {
                     state: 'success',
@@ -632,8 +617,6 @@ async def check_xhr_result(page):
             const strongOkRe = new RegExp(pats.strongOk, 'i');
             const skipUrlRe = new RegExp(pats.skip, 'i');
 
-            // Тело "выглядит как success", только если нет
-            // strict-error без сильного OK-сигнала.
             function looksOk(b) {
                 if (strictErrRe.test(b) && !strongOkRe.test(b))
                     return false;
@@ -695,7 +678,6 @@ async def check_xhr_result(page):
             if (hasCaptcha) return captchaResult;
             if (hasError) return errorResult;
 
-            // Успешный POST без тела ответа
             for (const r of rs) {
                 const u = (r.url||'').toLowerCase();
                 if (/metric|analytic|yandex|google|pixel/
@@ -763,7 +745,6 @@ async def detect_submission_result(
                 } catch(e) { return false; }
             }
 
-            // --- wpcf7: класс на форме ---
             if (formEl) {
                 try {
                     const cls = (formEl.className || '').toString().toLowerCase();
@@ -773,7 +754,6 @@ async def detect_submission_result(
                 } catch(e) {}
             }
 
-            // --- Проверка: форма исчезла ---
             let formGone = false;
             if (formEl) {
                 try {
@@ -789,7 +769,6 @@ async def detect_submission_result(
                 } catch(e) { formGone = true; }
             }
 
-            // --- Scope: сначала область формы, потом body ---
             const formScope = getFormScope(formEl);
             const scopes = formScope
                 ? [formScope, document.body]
@@ -800,14 +779,12 @@ async def detect_submission_result(
                 const isFallback = si > 0;
                 const text = (scope.innerText || '').toLowerCase();
 
-                // Приоритет 1: ERROR-фразы (только НОВЫЕ)
                 for (const p of errorPhrases) {
                     if (text.includes(p) && isNew(p, preText)) {
                         return {state: 'error', match: p};
                     }
                 }
 
-                // Error-элементы в scope формы
                 if (!isFallback && formEl) {
                     const errSels = '.form-error, '
                         + '.field-error, '
@@ -826,10 +803,6 @@ async def detect_submission_result(
                         };
                 }
 
-                // Приоритет 2: SUCCESS-фразы
-                // При навигации на другую страницу не доверяем
-                // обычному текстовому поиску в body —
-                // только success-элементам (ниже)
                 if (!(urlChanged && isFallback)) {
                     for (const p of successPhrases) {
                         if (text.includes(p)) {
@@ -839,7 +812,6 @@ async def detect_submission_result(
                     }
                 }
 
-                // Новые success-элементы
                 const successSels = '.success, .alert-success, '
                     + '.form-success, '
                     + '[class*="success" i], '
@@ -866,7 +838,6 @@ async def detect_submission_result(
                     }
                 }
 
-                // wpcf7: проверка по data-атрибуту
                 const wpcf7 = scope.querySelector(
                     '.wpcf7-response-output');
                 if (wpcf7 && isVis(wpcf7)) {
@@ -883,7 +854,6 @@ async def detect_submission_result(
                     }
                 }
 
-                // Tilda success box
                 const tSucc = scope.querySelector(
                     '.t-form__successbox, [class*="t-form__success" i]');
                 if (tSucc && isVis(tSucc)) {
@@ -897,7 +867,6 @@ async def detect_submission_result(
 
                 if (!isFallback) continue;
 
-                // Fallback body: error-элементы (строже)
                 const errSelsFb = '.form-error, .field-error, '
                     + '.is-invalid, [aria-invalid="true"]';
                 let visErrFb = 0;
@@ -913,14 +882,12 @@ async def detect_submission_result(
                     };
             }
 
-            // --- Форма исчезла ---
             if (formGone) {
                 if (urlChanged) {
                     const url = location.href.toLowerCase();
                     if (/thank|success|спасиб|заявк|blagodar|sent|done|complet|confirm|received|принят|отправлен|готово|formstatus|order.?success/i.test(url))
                         return {state: 'likely_success',
                             match: 'redirect to success URL'};
-                    // Ищем success в заголовках новой стр.
                     const hh = document.querySelectorAll(
                         'h1,h2,h3,h4,.title,[class*="title" i]');
                     for (const h of hh) {
@@ -943,7 +910,6 @@ async def detect_submission_result(
                     match: 'form disappeared'};
             }
 
-            // --- Форма на месте, поля пустые ---
             if (formEl && !formGone) {
                 try {
                     const inputs = formEl.querySelectorAll(

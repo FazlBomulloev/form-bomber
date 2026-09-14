@@ -230,7 +230,6 @@ async def _select_country_code_7(page, phone_el):
                     ?.parentElement;
             if (!form) return false;
 
-            // 1. <select> с кодами стран
             const sels = form.querySelectorAll('select');
             for (const s of sels) {
                 const opts = Array.from(s.options);
@@ -261,8 +260,6 @@ async def _select_country_code_7(page, phone_el):
                 }
             }
 
-            // 2a. Tilda phonemask виджет —
-            //     кастомный div с API
             const pm = el.closest(
                 '.t-input-phonemask__wrap'
             ) || el.closest('.t-input-block');
@@ -299,7 +296,6 @@ async def _select_country_code_7(page, phone_el):
                         return 'tilda_api:+7';
                     } catch (e) { /* fallthrough */ }
                 }
-                // fallback: клик на флаг + выбор RU
                 const flagEl = pm.querySelector(
                     '.t-input-phonemask__select-flag,'
                     + '.t-input-phonemask__flag,'
@@ -312,7 +308,6 @@ async def _select_country_code_7(page, phone_el):
                 }
             }
 
-            // 2b. Tilda phone mask — скрытый select
             const tildaSel = form.querySelector(
                 'select.t-sel-phonemask,'
                 + 'select[class*="phonemask" i],'
@@ -340,8 +335,6 @@ async def _select_country_code_7(page, phone_el):
                 }
             }
 
-            // 3. intl-tel-input — кликаем на
-            //    флаг России
             const iti = form.querySelector(
                 '.iti__flag-container,'
                 + '.intl-tel-input .flag-container,'
@@ -599,8 +592,6 @@ async def smart_phone_fill(
         mask_hint = bool(await page.evaluate(r"""el => {
             try {
                 const ph = (el.placeholder || '');
-                // только шаблоны маски (подчёркивания,
-                // скобка+подчёрк/цифры), НЕ голый "+7"
                 if (/[_]{2,}|\(\s*_|\(\s*\d{3}/.test(ph))
                     return true;
                 const cls = (
@@ -1297,7 +1288,6 @@ async def _looks_like_phone_field(page, el) -> bool:
                 ].filter(Boolean).join(' ').toLowerCase();
                 if (/phone|телеф|моб|\btel\b/.test(haystack))
                     return true;
-                // Маскированный шаблон в value/placeholder
                 const sample = (
                     (el.value || '')
                     + ' '
@@ -1686,12 +1676,13 @@ async def do_submit(page, submit_sel, form_el=None):
                 await asyncio.sleep(3.5)
                 return True
 
+    _fallback_sels = [
+        'button[type="submit"]',
+        'input[type="submit"]',
+        'button:not([type])',
+    ]
     if form_el:
-        for sel in [
-            'button[type="submit"]',
-            'input[type="submit"]',
-            'button:not([type])',
-        ]:
+        for sel in _fallback_sels:
             try:
                 btn = await form_el.query_selector(sel)
                 if btn:
@@ -1699,19 +1690,13 @@ async def do_submit(page, submit_sel, form_el=None):
                         page, btn, aggressive=True,
                     )
                     if log:
-                        log.log_action(
-                            "submit", f"form>{sel}",
-                        )
+                        log.log_action("submit", f"form>{sel}")
                     await asyncio.sleep(3.5)
                     return True
             except Exception:
                 continue
 
-    for sel in [
-        'button[type="submit"]',
-        'input[type="submit"]',
-        'button:not([type])',
-    ]:
+    for sel in _fallback_sels:
         el = await find_el(page, sel)
         if el:
             await smart_click(page, el, aggressive=True)
@@ -1859,8 +1844,6 @@ async def fill_all_empty_fields(
                 + 'textarea, select'
             )) {
                 if (!isShown(el)) continue;
-                // === Honeypot detection ===
-                // Off-screen via position/coords
                 try {
                     const r = el.getBoundingClientRect();
                     const st = getComputedStyle(el);
@@ -1873,7 +1856,6 @@ async def fill_all_empty_fields(
                         && (el.name || '').match(
                             /website|url|fax|address2|honeypot|hp_/i))
                         continue;
-                    // CSS-classed honeypot signatures
                     const hsig = (
                         (el.name||'') + ' '
                         + (el.id||'') + ' '

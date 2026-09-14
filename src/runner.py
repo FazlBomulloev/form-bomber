@@ -2,7 +2,6 @@ import asyncio
 import json
 import re
 import shutil
-import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -21,6 +20,7 @@ from db import (
     db_create_session, db_add_result,
     db_finish_session,
     db_create_queue, db_add_queue_client,
+    db_add_queue_group, db_get_queue_groups,
     db_get_queue, db_get_queue_clients,
     db_update_queue_status, db_update_queue_progress,
     db_update_client_status,
@@ -29,7 +29,7 @@ from db import (
     db_delete_form_profile,
 )
 from ai_provider import (
-    ask_ai_sync, collect_full_html, is_vision_provider,
+    ask_ai_sync, collect_full_html,
 )
 from form_finder import extract_forms, build_smart_plan
 from form_filler import (
@@ -46,7 +46,7 @@ from calltouch import try_calltouch
 
 _ai_sem = asyncio.Semaphore(AI_CONCURRENCY)
 _ws_clients: set = set()
-_browser = None
+_browsers: list = []
 _pw = None
 _browser_lock = asyncio.Lock()
 _active_queue_id: str | None = None
@@ -55,7 +55,6 @@ _active_tasks: set = set()
 _active_contexts: set = set()
 _active_queue_task = None
 LOG_DIR = Path("data/logs")
-LOG_RETENTION_DAYS = 3
 
 def _cleanup_data_except_db():
     data_dir = Path("data")
@@ -72,28 +71,6 @@ def _cleanup_data_except_db():
         except Exception:
             pass
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-async def _logs_ttl_loop():
-    while True:
-        try:
-            await asyncio.sleep(3600)
-            cutoff = time.time() - LOG_RETENTION_DAYS * 86400
-            if not LOG_DIR.exists():
-                continue
-            for sid_dir in LOG_DIR.iterdir():
-                try:
-                    if not sid_dir.is_dir():
-                        continue
-                    if sid_dir.stat().st_mtime < cutoff:
-                        shutil.rmtree(
-                            sid_dir, ignore_errors=True,
-                        )
-                except Exception:
-                    continue
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            pass
 
 async def force_stop_all():
     _queue_cancel.set()
@@ -342,9 +319,14 @@ def parse_proxy(raw: str) -> dict | None:
         return {"server": f"http://{parts[0]}:{parts[1]}"}
     return None
 
-async def _reset_browser():
-    global _browser, _pw
-    _browser = None
+async def _reset_browsers():
+    global _browsers, _pw
+    for br in list(_browsers):
+        try:
+            await br.close()
+        except Exception:
+            pass
+    _browsers = []
     try:
         if _pw:
             await _pw.stop()
@@ -352,25 +334,35 @@ async def _reset_browser():
         pass
     _pw = None
 
-async def _get_browser():
-    global _browser, _pw
+async def _ensure_browsers(count: int = 2):
+    global _browsers, _pw
     async with _browser_lock:
-        if _browser is not None:
+        alive = []
+        for br in _browsers:
             try:
-                _browser.contexts
-                return _browser
+                br.contexts
+                alive.append(br)
             except Exception:
-                await _reset_browser()
-        _pw = await async_playwright().start()
-        _browser = await _pw.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features="
-                "AutomationControlled",
-                "--no-sandbox",
-            ],
-        )
-        return _browser
+                pass
+        _browsers = alive
+        if len(_browsers) >= count:
+            return _browsers[:count]
+        if _pw is None:
+            _pw = await async_playwright().start()
+        while len(_browsers) < count:
+            br = await _pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                ],
+            )
+            _browsers.append(br)
+        return _browsers[:count]
+
+async def _get_browser(idx: int = 0):
+    browsers = await _ensure_browsers(max(1, idx + 1))
+    return browsers[idx % len(browsers)]
 
 async def _ws_broadcast(data: dict):
     msg = json.dumps(data, ensure_ascii=False)
@@ -381,6 +373,45 @@ async def _ws_broadcast(data: dict):
         except Exception:
             dead.add(ws)
     _ws_clients.difference_update(dead)
+
+async def _resolve_captcha_overlay(page, cap_type, url, rucaptcha_key):
+    from captcha import (
+        _try_click_smartcaptcha,
+        _solve_smartcaptcha_overlay,
+        _extract_smartcaptcha_sitekey,
+        _solve_captcha,
+        _inject_captcha_token,
+        _detect_image_captcha,
+    )
+    if cap_type in ("yandex_smartcaptcha", "captcha_overlay"):
+        try:
+            if await _try_click_smartcaptcha(page):
+                await asyncio.sleep(3)
+                if not await detect_captcha_overlay(page):
+                    return True
+        except Exception:
+            pass
+        if rucaptcha_key:
+            try:
+                if await _solve_smartcaptcha_overlay(page, url, rucaptcha_key) == "ok":
+                    return True
+            except Exception:
+                pass
+            try:
+                sk = await _extract_smartcaptcha_sitekey(page)
+                if sk:
+                    tok = await _solve_captcha("yandex", sk, url, rucaptcha_key)
+                    if tok and await _inject_captcha_token(page, "yandex", tok):
+                        return True
+            except Exception:
+                pass
+    elif cap_type == "image_captcha" and rucaptcha_key:
+        try:
+            if await _detect_image_captcha(page, rucaptcha_key) == "ok":
+                return True
+        except Exception:
+            pass
+    return False
 
 def _classify_reason(result: dict) -> str:
     status = result.get("status", "")
@@ -546,6 +577,7 @@ async def check_site_v2(
     proxy: dict = None,
     session_id: str = "",
     ai_provider: str = "deepseek",
+    browser_idx: int = 0,
 ):
     domain = domain_from_url(url)
     sid_log_dir = (
@@ -581,7 +613,7 @@ async def check_site_v2(
             ctx_kwargs["proxy"] = proxy
         for _br_try in range(2):
             try:
-                browser = await _get_browser()
+                browser = await _get_browser(browser_idx)
                 ctx = await browser.new_context(
                     **ctx_kwargs,
                 )
@@ -590,7 +622,7 @@ async def check_site_v2(
                 page = await ctx.new_page()
                 break
             except Exception:
-                await _reset_browser()
+                await _reset_browsers()
                 if _br_try == 1:
                     raise
                 _logger.warn("браузер упал, перезапуск")
@@ -626,7 +658,7 @@ async def check_site_v2(
                         except Exception:
                             pass
                         _active_contexts.discard(ctx)
-                        browser = await _get_browser()
+                        browser = await _get_browser(browser_idx)
                         ctx = await browser.new_context(
                             **ctx_kwargs,
                         )
@@ -649,74 +681,16 @@ async def check_site_v2(
             pre_cap = await detect_captcha_overlay(page)
             if pre_cap:
                 _logger.warn(
-                    f"captcha overlay при загрузке: "
-                    f"{pre_cap}"
+                    f"captcha overlay при загрузке: {pre_cap}"
                 )
-                from captcha import (
-                    _try_click_smartcaptcha,
-                    _solve_smartcaptcha_overlay,
-                    _extract_smartcaptcha_sitekey,
-                    _solve_captcha,
-                    _inject_captcha_token,
-                )
-                cap_solved = False
-                clicked = (
-                    await _try_click_smartcaptcha(page)
-                )
-                if clicked:
-                    await asyncio.sleep(3)
-                    still = (
-                        await detect_captcha_overlay(page)
-                    )
-                    if not still:
-                        cap_solved = True
-                        _logger.ok(
-                            "captcha overlay: клик помог"
-                        )
-                if not cap_solved and rucaptcha_key:
-                    sc_res = (
-                        await _solve_smartcaptcha_overlay(
-                            page, url, rucaptcha_key,
-                        )
-                    )
-                    if sc_res == "ok":
-                        cap_solved = True
-                        _logger.ok(
-                            "captcha overlay решена API"
-                        )
-                    else:
-                        sitekey = (
-                            await
-                            _extract_smartcaptcha_sitekey(
-                                page,
-                            )
-                        )
-                        if sitekey:
-                            token = await _solve_captcha(
-                                "yandex", sitekey,
-                                url, rucaptcha_key,
-                            )
-                            if token:
-                                ok = (
-                                    await
-                                    _inject_captcha_token(
-                                        page, "yandex",
-                                        token,
-                                    )
-                                )
-                                if ok:
-                                    cap_solved = True
-                                    _logger.ok(
-                                        "captcha overlay "
-                                        "решена yandex API"
-                                    )
-                if cap_solved:
+                if await _resolve_captcha_overlay(
+                    page, pre_cap, url, rucaptcha_key,
+                ):
+                    _logger.ok("captcha overlay решена")
                     await asyncio.sleep(2)
                     try:
                         await page.reload(
-                            wait_until=(
-                                "domcontentloaded"
-                            ),
+                            wait_until="domcontentloaded",
                             timeout=15000,
                         )
                     except Exception:
@@ -883,18 +857,6 @@ async def check_site_v2(
                 page_html = await collect_full_html(
                     page
                 )
-                shot_b64 = None
-                if is_vision_provider(ai_provider):
-                    try:
-                        import base64
-                        raw = await page.screenshot(
-                            type="jpeg", quality=60,
-                        )
-                        shot_b64 = base64.b64encode(
-                            raw
-                        ).decode("ascii")
-                    except Exception:
-                        shot_b64 = None
                 async with _ai_sem:
                     try:
                         (
@@ -902,7 +864,7 @@ async def check_site_v2(
                         ) = await asyncio.to_thread(
                             ask_ai_sync,
                             page_html, url, ai_key,
-                            ai_provider, shot_b64,
+                            ai_provider, None,
                         )
                         tokens += ai_tokens
                         _logger.log_ai(
@@ -1005,92 +967,26 @@ async def check_site_v2(
                 if ct_result:
                     result.update(ct_result)
 
-            if result["status"] not in (
-                "success", "captcha",
-            ):
-                cap_type = (
-                    await detect_captcha_overlay(page)
-                )
+            if result["status"] not in ("success", "captcha"):
+                cap_type = await detect_captcha_overlay(page)
                 if cap_type:
-                    _logger.warn(
-                        f"captcha overlay: {cap_type}"
-                    )
-                    from captcha import (
-                        _try_click_smartcaptcha
-                        as _tcs_final,
-                        _solve_smartcaptcha_overlay
-                        as _sso_final,
-                        _detect_image_captcha
-                        as _dic_final,
-                    )
-                    final_solved = False
-                    if cap_type in (
-                        "yandex_smartcaptcha",
-                        "captcha_overlay",
+                    _logger.warn(f"captcha overlay: {cap_type}")
+                    if await _resolve_captcha_overlay(
+                        page, cap_type, url, rucaptcha_key,
                     ):
-                        try:
-                            cl = await _tcs_final(page)
-                            if cl:
-                                await asyncio.sleep(3)
-                                st = (
-                                    await
-                                    detect_captcha_overlay(
-                                        page
-                                    )
-                                )
-                                if not st:
-                                    final_solved = True
-                        except Exception:
-                            pass
-                        if (
-                            not final_solved
-                            and rucaptcha_key
-                        ):
-                            try:
-                                r = await _sso_final(
-                                    page, url,
-                                    rucaptcha_key,
-                                )
-                                if r == "ok":
-                                    final_solved = True
-                            except Exception:
-                                pass
-                    elif (
-                        cap_type == "image_captcha"
-                        and rucaptcha_key
-                    ):
-                        try:
-                            r = await _dic_final(
-                                page, rucaptcha_key,
-                            )
-                            if r == "ok":
-                                final_solved = True
-                        except Exception:
-                            pass
-                    if final_solved:
                         _logger.ok(
-                            "captcha overlay решена "
-                            "в финале"
+                            "captcha overlay решена в финале"
                         )
                         result.update({
                             "status": "uncertain",
-                            "method": (
-                                "captcha_overlay"
-                                "_solved"
-                            ),
-                            "message": (
-                                "Капча-оверлей "
-                                "решена"
-                            ),
+                            "method": "captcha_overlay_solved",
+                            "message": "Капча-оверлей решена",
                         })
                     else:
                         result.update({
                             "status": "captcha",
                             "method": "captcha_overlay",
-                            "message": (
-                                f"Капча-оверлей: "
-                                f"{cap_type}"
-                            ),
+                            "message": f"Капча-оверлей: {cap_type}",
                             "reason_code": "captcha",
                         })
 
@@ -1337,86 +1233,129 @@ async def run_session(
     )
     return sid
 
-async def _run_client(
+async def _ensure_profile_session(
     queue_id: str, client: dict,
-    urls: list, ai_key: str,
-    rucaptcha_key: str, max_attempts: int,
-    ai_provider: str = "deepseek",
-):
+) -> str:
+    if client.get("session_id"):
+        return client["session_id"]
     sid = str(uuid.uuid4())[:8]
-    client_id = client["id"]
-    proxy = parse_proxy(client.get("proxy", ""))
-
-    parts = [
-        client.get("firstname", ""),
-        client.get("lastname", ""),
-    ]
+    parts = [client.get("firstname", ""), client.get("lastname", "")]
     label = " ".join(p for p in parts if p)
     session_name = (
         f"{label} ({client['phone']})"
         if label else client["phone"]
     )
-
     await db_create_session(
-        sid, session_name, len(urls),
-        queue_id=queue_id,
-        client_id=client_id,
+        sid, session_name, 0,
+        queue_id=queue_id, client_id=client["id"],
     )
     await db_update_client_status(
-        client_id, "running", session_id=sid,
+        client["id"], "running", session_id=sid,
     )
+    client["session_id"] = sid
+    return sid
 
-    await _ws_broadcast({
-        "type": "client_start",
-        "queue_id": queue_id,
-        "client_id": client_id,
-        "session_id": sid,
-        "client_position": client["position"],
-        "client_name": session_name,
-        "total_urls": len(urls),
-    })
+async def _process_url_once(
+    task: dict, client: dict, sid: str,
+    ai_key: str, rucaptcha_key: str,
+    ai_provider: str, worker_id: int,
+    tabs_per_browser: int,
+) -> dict:
+    url = task["url"]
+    comment = task.get("comment", "")
+    proxy = parse_proxy(client.get("proxy", ""))
+    browser_idx = worker_id // max(1, tabs_per_browser)
 
-    sem = asyncio.Semaphore(CONCURRENCY)
+    current = asyncio.current_task()
+    if current is not None:
+        _active_tasks.add(current)
+    try:
+        if _queue_cancel.is_set():
+            return {"url": url, "status": "cancelled"}
+        await _ws_broadcast({
+            "type": "attempt",
+            "url": url,
+            "attempt_no": 1,
+            "max_attempts": 1,
+            "retrying": False,
+        })
+        try:
+            result = await check_site_v2(
+                url,
+                client["phone"],
+                client.get("firstname", ""),
+                client.get("lastname", ""),
+                client.get("patronymic", ""),
+                client.get("email", ""),
+                comment,
+                ai_key, rucaptcha_key,
+                attempt_no=1, max_retries=1,
+                proxy=proxy,
+                session_id=sid,
+                ai_provider=ai_provider,
+                browser_idx=browser_idx,
+            )
+        except asyncio.CancelledError:
+            return {"url": url, "status": "cancelled"}
+        except Exception as e:
+            result = {
+                "url": url, "status": "failed",
+                "method": "crash",
+                "message": f"{type(e).__name__}: {str(e)[:120]}",
+                "tokens_used": 0,
+                "reason_code": "crash",
+                "attempt_no": 1,
+            }
+        await db_add_result(sid, url, result)
+        await _ws_broadcast({
+            "type": "result",
+            "url": url,
+            "status": result["status"],
+            "method": result.get("method", ""),
+            "message": result.get("message", ""),
+            "tokens_used": result.get("tokens_used", 0),
+            "ai_notes": (
+                (result.get("ai_instructions") or {}).get("notes", "")
+            ),
+            "reason_code": result.get("reason_code", ""),
+            "attempt_no": 1,
+            "max_attempts": 1,
+            "client_id": client["id"],
+        })
+        return result
+    finally:
+        if current is not None:
+            _active_tasks.discard(current)
+
+async def _process_chunk(
+    chunk: list, client: dict, sid: str,
+    ai_key: str, rucaptcha_key: str,
+    ai_provider: str,
+    concurrency: int, tabs_per_browser: int,
+) -> list:
+    sem = asyncio.Semaphore(concurrency)
+    results = []
+    lock = asyncio.Lock()
+
+    async def worker(worker_id: int, task: dict):
+        async with sem:
+            r = await _process_url_once(
+                task, client, sid,
+                ai_key, rucaptcha_key,
+                ai_provider, worker_id, tabs_per_browser,
+            )
+            async with lock:
+                results.append({"task": task, "result": r})
+
     tasks = [
-        _process_one(
-            u.strip(),
-            client["phone"],
-            client.get("firstname", ""),
-            client.get("lastname", ""),
-            client.get("patronymic", ""),
-            client.get("email", ""),
-            client.get("comment", ""),
-            ai_key, rucaptcha_key,
-            sid, sem, max_attempts,
-            proxy=proxy,
-            queue_id=queue_id,
-            ai_provider=ai_provider,
-        )
-        for u in urls if u.strip()
+        asyncio.create_task(worker(i % concurrency, t))
+        for i, t in enumerate(chunk)
     ]
     try:
-        await asyncio.gather(
-            *tasks, return_exceptions=True,
-        )
-    finally:
-        await db_finish_session(sid)
-        final_status = (
-            "cancelled" if _queue_cancel.is_set()
-            else "done"
-        )
-        await db_update_client_status(
-            client_id, final_status,
-        )
-
-        await _ws_broadcast({
-            "type": "client_done",
-            "queue_id": queue_id,
-            "client_id": client_id,
-            "session_id": sid,
-            "client_position": client["position"],
-            "status": final_status,
-        })
-    return sid
+        await asyncio.gather(*tasks, return_exceptions=True)
+    except asyncio.CancelledError:
+        pass
+    return results
 
 async def _run_queue_bg(queue_id: str):
     global _active_queue_id, _active_queue_task
@@ -1427,66 +1366,195 @@ async def _run_queue_bg(queue_id: str):
     try:
         queue = await db_get_queue(queue_id)
         clients = await db_get_queue_clients(queue_id)
-        urls = json.loads(queue["urls"])
+        groups = await db_get_queue_groups(queue_id)
+
+        sites: dict = {}
+        for g in groups:
+            try:
+                urls_list = json.loads(g.get("urls") or "[]")
+            except Exception:
+                urls_list = []
+            for u in urls_list:
+                u = (u or "").strip()
+                if not u or u in sites:
+                    continue
+                sites[u] = {
+                    "url": u,
+                    "group_id": g["id"],
+                    "comment": g.get("comment", ""),
+                    "status": "pending",
+                    "tried": set(),
+                }
+
+        if not sites:
+            legacy_urls = json.loads(queue.get("urls") or "[]")
+            for u in legacy_urls:
+                u = (u or "").strip()
+                if not u or u in sites:
+                    continue
+                sites[u] = {
+                    "url": u,
+                    "group_id": None,
+                    "comment": "",
+                    "status": "pending",
+                    "tried": set(),
+                }
+
+        chunk_size = int(queue.get("chunk_size", 100) or 100)
+        rest_seconds = int(queue.get("rest_seconds", 180) or 180)
+        browser_count = int(queue.get("browser_count", 2) or 2)
+        tabs_per_browser = int(queue.get("tabs_per_browser", 2) or 2)
+        concurrency = max(1, browser_count * tabs_per_browser)
+        drop_after_tries = min(2, max(1, len(clients)))
+        ai_provider = (queue.get("ai_provider") or "deepseek").lower()
+        ai_key = (
+            queue.get("deepseek_key", "")
+            if ai_provider == "deepseek"
+            else queue.get("claude_key", "")
+        )
+        rucaptcha_key = queue.get("rucaptcha_key", "")
 
         await db_update_queue_status(queue_id, "running")
         await _ws_broadcast({
             "type": "queue_start",
             "queue_id": queue_id,
             "total_clients": len(clients),
-            "total_urls": len(urls),
+            "total_urls": len(sites),
+            "chunk_size": chunk_size,
+            "rest_seconds": rest_seconds,
+            "concurrency": concurrency,
         })
 
-        start_idx = queue.get("current_client_idx", 0)
+        active_clients = list(clients)
+        rr_idx = 0
 
-        for i, client in enumerate(
-            clients[start_idx:], start=start_idx,
-        ):
+        while sites and active_clients:
             if _queue_cancel.is_set():
                 break
+
+            client = active_clients[rr_idx % len(active_clients)]
+            cid = client["id"]
+
+            candidates = [
+                s for s in sites.values()
+                if s["status"] == "pending" and cid not in s["tried"]
+            ]
+            if not candidates:
+                active_clients.pop(rr_idx % len(active_clients))
+                if not active_clients:
+                    break
+                continue
+
+            chunk = candidates[:chunk_size]
+            sid = await _ensure_profile_session(queue_id, client)
 
             await _wait_for_working_hours(queue_id)
             if _queue_cancel.is_set():
                 break
 
-            await db_update_queue_progress(
-                queue_id, i, i,
+            await _ws_broadcast({
+                "type": "chunk_start",
+                "queue_id": queue_id,
+                "client_id": cid,
+                "session_id": sid,
+                "client_position": client["position"],
+                "chunk_size": len(chunk),
+                "remaining_sites": len(sites),
+            })
+
+            chunk_results = await _process_chunk(
+                chunk, client, sid,
+                ai_key, rucaptcha_key,
+                ai_provider,
+                concurrency, tabs_per_browser,
             )
 
-            try:
-                q_provider = (
-                    queue.get("ai_provider")
-                    or "claude"
-                ).lower()
-                q_ai_key = (
-                    queue.get("deepseek_key", "")
-                    if q_provider == "deepseek"
-                    else queue.get("claude_key", "")
-                )
-                await _run_client(
-                    queue_id, client, urls,
-                    q_ai_key,
-                    queue["rucaptcha_key"],
-                    queue["max_attempts"],
-                    ai_provider=q_provider,
-                )
-            except asyncio.CancelledError:
+            success_urls = {
+                r["task"]["url"]
+                for r in chunk_results
+                if (r.get("result") or {}).get("status") == "success"
+            }
+            for s in chunk:
+                s["tried"].add(cid)
+                if s["url"] in success_urls:
+                    s["status"] = "success"
+
+            done_urls = []
+            for url, s in list(sites.items()):
+                if s["status"] == "success":
+                    done_urls.append(url)
+                    del sites[url]
+                elif len(s["tried"]) >= drop_after_tries:
+                    done_urls.append(url)
+                    del sites[url]
+
+            done_clients = sum(
+                1 for c in clients if c["id"] not in {c2["id"] for c2 in active_clients}
+            )
+            await db_update_queue_progress(
+                queue_id, rr_idx, done_clients,
+            )
+
+            await _ws_broadcast({
+                "type": "chunk_done",
+                "queue_id": queue_id,
+                "client_id": cid,
+                "session_id": sid,
+                "chunk_size": len(chunk),
+                "remaining_sites": len(sites),
+                "dropped": len(done_urls),
+            })
+
+            if _queue_cancel.is_set():
                 break
 
-            await db_update_queue_progress(
-                queue_id, i + 1, i + 1,
-            )
+            try:
+                await _reset_browsers()
+            except Exception:
+                pass
+            _active_contexts.clear()
+
+            if sites and rest_seconds > 0:
+                await _ws_broadcast({
+                    "type": "rest",
+                    "queue_id": queue_id,
+                    "seconds": rest_seconds,
+                })
+                try:
+                    await asyncio.wait_for(
+                        _queue_cancel.wait(),
+                        timeout=rest_seconds,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    pass
+
+            rr_idx += 1
 
         if _queue_cancel.is_set():
             final = "cancelled"
     except asyncio.CancelledError:
         final = "cancelled"
     finally:
+        try:
+            for c in await db_get_queue_clients(queue_id):
+                if c.get("session_id"):
+                    await db_finish_session(c["session_id"])
+                await db_update_client_status(
+                    c["id"],
+                    "cancelled" if final == "cancelled" else "done",
+                )
+        except Exception:
+            pass
         await db_update_queue_status(queue_id, final)
         _active_queue_id = None
         _active_queue_task = None
         _active_tasks.clear()
         _active_contexts.clear()
+        try:
+            await _reset_browsers()
+        except Exception:
+            pass
 
         await _ws_broadcast({
             "type": "queue_done",
@@ -1499,9 +1567,14 @@ async def run_queue(
     claude_key: str = "",
     rucaptcha_key: str = "",
     queue_name: str = "",
-    max_attempts: int = 3,
+    max_attempts: int = 1,
     deepseek_key: str = "",
     ai_provider: str = "deepseek",
+    groups: list = None,
+    chunk_size: int = 100,
+    rest_seconds: int = 180,
+    browser_count: int = 2,
+    tabs_per_browser: int = 2,
 ) -> str:
     global _active_queue_id
     global _active_queue_task
@@ -1513,13 +1586,39 @@ async def run_queue(
     qid = str(uuid.uuid4())[:8]
     ai_provider = (ai_provider or "deepseek").lower()
 
+    groups = groups or []
+    all_urls = list(urls or [])
+    for g in groups:
+        all_urls.extend(g.get("urls", []) or [])
+    seen = set()
+    dedup_urls = []
+    for u in all_urls:
+        u = (u or "").strip()
+        if u and u not in seen:
+            seen.add(u)
+            dedup_urls.append(u)
+
     await db_create_queue(
-        qid, queue_name or qid, urls,
+        qid, queue_name or qid, dedup_urls,
         claude_key, rucaptcha_key,
         max_attempts, len(clients),
         deepseek_key=deepseek_key,
         ai_provider=ai_provider,
+        chunk_size=chunk_size,
+        rest_seconds=rest_seconds,
+        browser_count=browser_count,
+        tabs_per_browser=tabs_per_browser,
     )
+
+    if not groups and dedup_urls:
+        groups = [{"name": "", "comment": "", "urls": dedup_urls}]
+    for i, g in enumerate(groups):
+        await db_add_queue_group(
+            qid, i,
+            g.get("name", ""),
+            g.get("comment", ""),
+            g.get("urls", []) or [],
+        )
 
     for i, c in enumerate(clients):
         await db_add_queue_client(

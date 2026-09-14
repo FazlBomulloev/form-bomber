@@ -108,6 +108,10 @@ async def db_init():
         for col, default in [
             ("deepseek_key", "TEXT DEFAULT ''"),
             ("ai_provider", "TEXT DEFAULT 'claude'"),
+            ("chunk_size", "INTEGER DEFAULT 100"),
+            ("rest_seconds", "INTEGER DEFAULT 180"),
+            ("browser_count", "INTEGER DEFAULT 2"),
+            ("tabs_per_browser", "INTEGER DEFAULT 2"),
         ]:
             try:
                 await db.execute(
@@ -115,6 +119,17 @@ async def db_init():
                 )
             except Exception:
                 pass
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS queue_groups (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                queue_id   TEXT NOT NULL,
+                position   INTEGER NOT NULL,
+                name       TEXT DEFAULT '',
+                comment    TEXT DEFAULT '',
+                urls       TEXT DEFAULT '[]',
+                created_at TEXT DEFAULT (datetime('now','localtime'))
+            )
+        """)
         await db.commit()
 
 async def db_create_session(
@@ -209,23 +224,77 @@ async def db_create_queue(
     max_attempts: int, total_clients: int,
     deepseek_key: str = "",
     ai_provider: str = "claude",
+    chunk_size: int = 100,
+    rest_seconds: int = 180,
+    browser_count: int = 2,
+    tabs_per_browser: int = 2,
 ):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO queue"
             "(id,name,urls,claude_key,deepseek_key,"
             "ai_provider,rucaptcha_key,"
-            "max_attempts,total_clients) "
-            "VALUES(?,?,?,?,?,?,?,?,?)",
+            "max_attempts,total_clients,"
+            "chunk_size,rest_seconds,"
+            "browser_count,tabs_per_browser) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 qid, name,
                 json.dumps(urls, ensure_ascii=False),
                 claude_key, deepseek_key, ai_provider,
                 rucaptcha_key,
                 max_attempts, total_clients,
+                chunk_size, rest_seconds,
+                browser_count, tabs_per_browser,
             ),
         )
         await db.commit()
+
+async def db_add_queue_group(
+    queue_id: str, position: int,
+    name: str, comment: str, urls: list,
+) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO queue_groups"
+            "(queue_id,position,name,comment,urls) "
+            "VALUES(?,?,?,?,?)",
+            (
+                queue_id, position, name, comment,
+                json.dumps(urls, ensure_ascii=False),
+            ),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+async def db_get_queue_groups(qid: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM queue_groups "
+            "WHERE queue_id=? ORDER BY position",
+            (qid,),
+        ) as c:
+            return [dict(r) for r in await c.fetchall()]
+
+async def db_get_success_urls(qid: str) -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT DISTINCT r.url FROM results r "
+            "JOIN queue_clients qc ON qc.session_id = r.session_id "
+            "WHERE qc.queue_id=? AND r.status='success' "
+            "ORDER BY r.url",
+            (qid,),
+        ) as c:
+            return [row[0] for row in await c.fetchall()]
+
+async def db_get_all_success_urls() -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT DISTINCT url FROM results "
+            "WHERE status='success' ORDER BY url"
+        ) as c:
+            return [row[0] for row in await c.fetchall()]
 
 async def db_add_queue_client(
     queue_id: str, position: int,

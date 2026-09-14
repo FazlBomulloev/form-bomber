@@ -3,7 +3,6 @@ from typing import Optional
 from logger import get_logger
 
 FORM_EXTRACTOR_JS = r"""() => {
-    // ───── helpers ────────────────────────────────────
     function isVisible(el) {
         if (!el) return false;
         const st = getComputedStyle(el);
@@ -100,8 +99,6 @@ FORM_EXTRACTOR_JS = r"""() => {
         return '';
     }
 
-    // ───── Chromium-style scoring ─────────────────────
-    // Веса источников signal'ов (упорядочены по приоритету).
     const W = {
         autocomplete: 10,
         type:          8,
@@ -116,11 +113,9 @@ FORM_EXTRACTOR_JS = r"""() => {
         class:         2,
         id:            2,
     };
-    const ROLE_NORM = 14;   // нормализатор для confidence
+    const ROLE_NORM = 14;
     const ROLE_THRESHOLD = 0.5;
 
-    // Паттерны по ролям. Каждый паттерн — RegExp.
-    // Чёткие autocomplete-значения проверяются отдельно.
     const PATTERNS = {
         phone: [
             /\bphone\b/i, /\btel(?:ephone)?\b/i,
@@ -166,9 +161,6 @@ FORM_EXTRACTOR_JS = r"""() => {
         ],
     };
 
-    // autocomplete → role (точные значения WHATWG/Chromium spec).
-    // Firefox/Chrome Autofill считают autocomplete главным сигналом —
-    // он «trumps» любую эвристику по name/id/placeholder.
     const AC_MAP = {
         'tel': 'phone',
         'tel-national': 'phone',
@@ -198,9 +190,6 @@ FORM_EXTRACTOR_JS = r"""() => {
         'bday-day': 'date',
     };
 
-    // Разбор autocomplete: значение может нести секцию/режим
-    // (напр. «shipping tel», «section-a billing given-name»).
-    // Берём полную строку, затем последний токен.
     function acToRole(ac) {
         if (!ac) return null;
         ac = ac.trim().toLowerCase();
@@ -215,10 +204,6 @@ FORM_EXTRACTOR_JS = r"""() => {
         return null;
     }
 
-    // n-gram / подстрочный фолбэк: когда строгий regex не дал роль,
-    // ловим слипшиеся/сокращённые атрибуты (clientname, usrtel2,
-    // phonenum, fam_klienta). Логин-стемы (user/login/nick/pass)
-    // исключаем, чтобы «name» не ловил username/nickname.
     function ngramFallback(bag) {
         if (!bag) return null;
         bag = bag.toLowerCase();
@@ -226,7 +211,6 @@ FORM_EXTRACTOR_JS = r"""() => {
         if (/mail|почт|email/.test(bag)) return 'email';
         if (/тел|phon|\btel|mobil|\bмоб|gsm|whats|viber/.test(bag))
             return 'phone';
-        // фамилия — до общего name (иначе «nam» перехватит)
         if (/fam|фами|surname|lastname/.test(bag)) return 'lastname';
         if (/first.?name|given.?name|\bимя\b|имен/.test(bag))
             return 'firstname';
@@ -242,18 +226,15 @@ FORM_EXTRACTOR_JS = r"""() => {
             scores[role] = (scores[role] || 0) + w;
         }
 
-        // 1. autocomplete (highest priority)
         const ac = signals.ac;
         if (ac && AC_MAP[ac]) add(AC_MAP[ac], W.autocomplete);
 
-        // 2. type
         if (signals.type === 'tel') add('phone', W.type);
         if (signals.type === 'email') add('email', W.type);
         if (signals.type === 'date'
             || signals.type === 'datetime-local')
             add('date', W.type);
 
-        // 3. inputmode
         if (signals.im === 'tel') add('phone', W.inputmode);
         if (signals.im === 'email') add('email', W.inputmode);
         if (signals.im === 'numeric'
@@ -261,7 +242,6 @@ FORM_EXTRACTOR_JS = r"""() => {
                 + ' ' + signals.label)))
             add('phone', W.inputmode / 2);
 
-        // 4. data-* (data-field, data-name, data-tilda-rule)
         const dataBag = (
             signals.df + ' ' + signals.dn
             + ' ' + signals.rule);
@@ -279,7 +259,6 @@ FORM_EXTRACTOR_JS = r"""() => {
             }
         }
 
-        // 5-10. text-based sources
         const sources = [
             ['name',        signals.name,        W.name],
             ['label',       signals.label,       W.label],
@@ -301,12 +280,10 @@ FORM_EXTRACTOR_JS = r"""() => {
             }
         }
 
-        // 11. mask in placeholder (high signal для phone)
         if (signals.ph && /\+7|\+9|\(\d{2,4}\)|___[ -]___/
             .test(signals.ph))
             add('phone', W.mask);
 
-        // 12. pattern attribute (бонус если намекает на формат)
         if (signals.pattern) {
             const pat = signals.pattern;
             if (/\\d.{0,3}\\d/.test(pat)
@@ -345,7 +322,6 @@ FORM_EXTRACTOR_JS = r"""() => {
             pattern: el.getAttribute('pattern') || '',
         };
 
-        // Special tags first
         if (tag === 'textarea') {
             return {
                 role: 'comment', confidence: 0.9,
@@ -380,9 +356,6 @@ FORM_EXTRACTOR_JS = r"""() => {
             };
         }
 
-        // 0. autocomplete «trumps» эвристику (Firefox/Chrome Autofill):
-        // при известном autocomplete-значении роль ставим ПО НЕМУ,
-        // ДО regex по name/id/placeholder.
         const acRole = acToRole(signals.ac);
         if (acRole) {
             return {
@@ -391,20 +364,17 @@ FORM_EXTRACTOR_JS = r"""() => {
             };
         }
 
-        // Общая строка для n-gram-фолбэка (все текстовые источники).
         const ngBag = [
             signals.name, signals.id, signals.cls,
             signals.label, signals.aria, signals.title,
             signals.ph, signals.df, signals.dn, signals.rule,
         ].join(' ');
 
-        // Scoring
         const scores = scoreRole(el, signals);
         const ranked = Object.entries(scores)
             .sort((a, b) => b[1] - a[1]);
 
         if (!ranked.length) {
-            // fallback по type
             if (type === 'tel') return {
                 role: 'phone', confidence: 0.7,
                 alternatives: [], signals};
@@ -414,7 +384,6 @@ FORM_EXTRACTOR_JS = r"""() => {
             if (type === 'date') return {
                 role: 'date', confidence: 0.8,
                 alternatives: [], signals};
-            // строгий regex ничего не дал → n-gram-фолбэк
             const ng = ngramFallback(ngBag);
             if (ng) return {
                 role: ng, confidence: 0.55,
@@ -431,7 +400,6 @@ FORM_EXTRACTOR_JS = r"""() => {
             ([r, s]) => [r, Math.min(1, s / ROLE_NORM)]);
 
         if (confidence < ROLE_THRESHOLD) {
-            // строгий regex не набрал порог → пробуем n-gram-фолбэк
             const ng = ngramFallback(ngBag);
             if (ng) {
                 return {
@@ -453,7 +421,6 @@ FORM_EXTRACTOR_JS = r"""() => {
         return {role: topRole, confidence, alternatives, signals};
     }
 
-    // ───── extra extractors ──────────────────────────
     function extractMask(el, signals) {
         const ph = el.placeholder || '';
         if (/\+7|\+9|\(\d{2,4}\)|___|XXX|999/.test(ph))
@@ -482,7 +449,6 @@ FORM_EXTRACTOR_JS = r"""() => {
     function detectCaptcha(container) {
         const root = container || document;
 
-        // reCAPTCHA
         const rcEl = root.querySelector(
             '.g-recaptcha,[data-sitekey],'
             + 'iframe[src*="recaptcha"]');
@@ -511,7 +477,6 @@ FORM_EXTRACTOR_JS = r"""() => {
             }
         }
 
-        // hCaptcha
         const hc = root.querySelector(
             '.h-captcha,iframe[src*="hcaptcha"]');
         if (hc) {
@@ -525,7 +490,6 @@ FORM_EXTRACTOR_JS = r"""() => {
             };
         }
 
-        // Cloudflare Turnstile
         const ts = root.querySelector(
             '.cf-turnstile,iframe[src*="turnstile"]');
         if (ts) {
@@ -538,7 +502,6 @@ FORM_EXTRACTOR_JS = r"""() => {
             };
         }
 
-        // Yandex SmartCaptcha
         const yc = root.querySelector(
             '.smart-captcha,[data-sitekey][class*="smart"],'
             + 'iframe[src*="smartcaptcha"]');
@@ -618,7 +581,6 @@ FORM_EXTRACTOR_JS = r"""() => {
         return 'click';
     }
 
-    // ───── form structure scoring ────────────────────
     function scoreForm(container, fields, checkboxes) {
         let score = 0;
         const hasPhone = fields.some(
@@ -636,16 +598,13 @@ FORM_EXTRACTOR_JS = r"""() => {
         if (visibleFields >= 2 && visibleFields <= 5) score += 10;
         if (radios > 4) score -= radios * 3;
 
-        // Reject login: password field
         if (hasPassword) score -= 60;
 
-        // Reject newsletter: email only, no phone
         if (hasEmail && !hasPhone && visibleFields <= 2)
             score -= 25;
 
         const html = (container.innerHTML||'').toLowerCase();
 
-        // Reject search forms by content
         const searchBtn = Array.from(container.querySelectorAll(
             'button, input[type="submit"]')).some(b => {
                 const t = ((b.innerText||b.value||'')+'').toLowerCase();
@@ -707,9 +666,7 @@ FORM_EXTRACTOR_JS = r"""() => {
         return {selector: null, el: null};
     }
 
-    // ───── rationalization ────────────────────────────
     function rationalize(fields, container) {
-        // 1. Dedup roles (кроме radio/checkbox_other/text_unknown)
         const seen = {};
         const dedupRoles = new Set([
             'phone', 'email', 'name', 'firstname', 'lastname',
@@ -719,7 +676,6 @@ FORM_EXTRACTOR_JS = r"""() => {
         for (const f of fields) {
             if (!dedupRoles.has(f.role)) continue;
             if (seen[f.role]) {
-                // Понижаем дубликат до alternative
                 if (f.alternatives && f.alternatives.length) {
                     const next = f.alternatives.find(
                         a => !seen[a[0]]
@@ -739,7 +695,6 @@ FORM_EXTRACTOR_JS = r"""() => {
             if (dedupRoles.has(f.role)) seen[f.role] = true;
         }
 
-        // 2. Если есть firstname + lastname — generic name не нужен
         const hasFL = (
             fields.some(f => f.role === 'firstname')
             && fields.some(f => f.role === 'lastname'));
@@ -752,11 +707,6 @@ FORM_EXTRACTOR_JS = r"""() => {
             }
         }
 
-        // 3. Single text_unknown + phone → это name (default).
-        // P1-5: среди нераспознанных видимых текстовых полей
-        // приоритетно берём Tilda/name-хинтовое поле (placeholder/label/
-        // data-tilda-rule содержит «имя»/name/«как вас зовут»), а не
-        // просто первое. Так имя на Tilda не теряется.
         const hasPhone = fields.some(f => f.role === 'phone');
         const hasAnyName = fields.some(
             f => ['name','firstname','lastname'].includes(f.role));
@@ -778,19 +728,16 @@ FORM_EXTRACTOR_JS = r"""() => {
     }
 
     function isRejectedForm(container, fields) {
-        // 1. Password field present → login
         if (Array.from(container.querySelectorAll(
             'input[type="password"]')).some(isVisible))
             return 'has_password';
 
-        // 2. Only email, no phone, ≤2 fields → newsletter
         const hasPhone = fields.some(f => f.role === 'phone');
         const hasEmail = fields.some(f => f.role === 'email');
         const visibleCount = fields.filter(f => f.visible).length;
         if (hasEmail && !hasPhone && visibleCount <= 2)
             return 'newsletter';
 
-        // 3. Search keyword + search button
         const sigText = (
             (container.getAttribute('action')||'') + ' '
             + (container.getAttribute('role')||'') + ' '
@@ -834,7 +781,6 @@ FORM_EXTRACTOR_JS = r"""() => {
         }
     }
 
-    // ───── main extractor per container ───────────────
     function extractContainer(container) {
         const fields = [];
         const checkboxes = [];
@@ -874,9 +820,6 @@ FORM_EXTRACTOR_JS = r"""() => {
                 mask: extractMask(el, cls.signals),
             };
 
-            // Tilda / name-хинты для rationalize (задача P1-5):
-            // у Tilda-инпута имени часто нет обычного name-атрибута,
-            // но есть data-tilda-rule/-req или placeholder/label «имя».
             const _nameBag = [
                 fld.name, fld.id, fld.placeholder, fld.label,
                 (el.getAttribute('data-tilda-rule') || ''),
@@ -898,7 +841,6 @@ FORM_EXTRACTOR_JS = r"""() => {
                     }));
             }
 
-            // checkboxes собираем и в fields (compat), и в отдельный массив
             if (type === 'checkbox') {
                 checkboxes.push({
                     selector: selector,
@@ -914,7 +856,6 @@ FORM_EXTRACTOR_JS = r"""() => {
             fields.push(fld);
         }
 
-        // form_selector
         let formSelector = null;
         if (container.tagName === 'FORM') {
             if (container.id) {
@@ -943,11 +884,9 @@ FORM_EXTRACTOR_JS = r"""() => {
             }
         }
 
-        // submit + strategy
         const sub = findSubmit(container);
         const strategy = detectSubmitStrategy(container, sub.el);
 
-        // captcha + honeypots + csrf
         const captcha = detectCaptcha(container);
         const honeypots = detectHoneypots(container);
         const csrf = detectCsrf(container);
@@ -966,7 +905,6 @@ FORM_EXTRACTOR_JS = r"""() => {
     }
 
     function finalize(data, container, source) {
-        // Rationalization pass
         data.fields = rationalize(data.fields, container);
         const rejectReason = isRejectedForm(container, data.fields);
         if (rejectReason) {
@@ -982,9 +920,7 @@ FORM_EXTRACTOR_JS = r"""() => {
             f => f.role === 'phone');
     }
 
-    // ───── DISCOVERY STRATEGIES ──────────────────────
 
-    // Strategy 1: visible <form> with phone
     let visibleCandidates = [];
     for (const form of document.querySelectorAll('form')) {
         if (!isVisible(form)) continue;
@@ -999,7 +935,6 @@ FORM_EXTRACTOR_JS = r"""() => {
         visibleCandidates.push(data);
     }
     if (visibleCandidates.length) {
-        // Берём с highest score; при равенстве — наименьший по полям
         visibleCandidates.sort((a, b) => {
             if (b.score !== a.score) return b.score - a.score;
             return a._visibleCount - b._visibleCount;
@@ -1007,7 +942,6 @@ FORM_EXTRACTOR_JS = r"""() => {
         return visibleCandidates[0];
     }
 
-    // Strategy 2: hidden <form>
     for (const form of document.querySelectorAll('form')) {
         if (isSearchForm(form)) continue;
         const raw = extractContainer(form);
@@ -1018,7 +952,6 @@ FORM_EXTRACTOR_JS = r"""() => {
         if (data) return data;
     }
 
-    // Strategy 3: modal / container divs
     const modalSels = [
         '[role="dialog"]', '[aria-modal="true"]',
         '[class*="modal" i]:not(nav)',
@@ -1044,7 +977,6 @@ FORM_EXTRACTOR_JS = r"""() => {
         }
     }
 
-    // Strategy 3.5: shadow DOM
     try {
         const allEls = document.querySelectorAll('*');
         for (const host of allEls) {
@@ -1077,7 +1009,6 @@ FORM_EXTRACTOR_JS = r"""() => {
         }
     } catch(e) {}
 
-    // Strategy 4: phone-ancestor traversal
     const phoneSels = [
         'input[type="tel"]',
         'input.t-input-phonemask',
@@ -1107,12 +1038,6 @@ FORM_EXTRACTOR_JS = r"""() => {
         }
     }
 
-    // ── Strategy 5 (последний шанс, P2-7) ────────────
-    // Форма с CTA-кнопкой, но телефон НЕ распознан ни одной
-    // стратегией. Принимаем форму, если есть name|email|textarea,
-    // а телефон вводим в первый tel/numeric/пустой text-инпут формы.
-    // Приоритет НИЖЕ всех точных стратегий — только чтобы не терять
-    // формы вроде esteticart, где tel-поле не детектится.
     const ctaRe = /заказать звонок|перезвон|callback|записаться|\bзапись\b|оставить заявк|\bзаявк|консультац/i;
     for (const form of document.querySelectorAll('form')) {
         if (isSearchForm(form)) continue;
@@ -1135,8 +1060,6 @@ FORM_EXTRACTOR_JS = r"""() => {
         showHidden(form);
         const data = finalize(raw, form, 'cta_no_phone');
         if (!data) continue;
-        // Телефон не распознан → назначаем «куда вводить» и добавляем
-        // синтетическое phone-поле, чтобы build_smart_plan заполнил его.
         if (!hasPhoneField(data)) {
             const usedSel = new Set(data.fields.filter(
                 f => ['name','firstname','lastname','email',

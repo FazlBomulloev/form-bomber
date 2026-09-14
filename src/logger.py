@@ -163,36 +163,6 @@ class SiteLogger:
             error=error,
         )
 
-    def log_vision(
-        self, stage: str, response: dict,
-        screenshot_bytes: int = 0,
-        error: str = None,
-    ):
-        self._jdump(f"vision_{stage}.json", {
-            "timestamp": datetime.now().isoformat(),
-            "stage": stage,
-            "screenshot_bytes": screenshot_bytes,
-            "response": response,
-            "error": error,
-        })
-        t = self._t()
-        if error:
-            self._w(
-                self._runlog,
-                f"[{t:7.2f}s] ✗ Vision[{stage}] "
-                f"ERROR: {error}\n",
-            )
-        else:
-            r = response or {}
-            self._w(self._runlog, (
-                f"[{t:7.2f}s] ✓ Vision[{stage}]: "
-                f"state={r.get('state')!r}  "
-                f"notes={r.get('notes', '')!r}\n"
-            ))
-        self._ev(
-            "vision", stage=stage, error=error,
-        )
-
     def log_captcha(self, action: str, **kw):
         t = self._t()
         kv = "  ".join(
@@ -231,13 +201,6 @@ class SiteLogger:
             selector=selector,
             success=success,
             error=error[:80] if error else "",
-        )
-
-    def log_shot(self, name: str, path_str: str):
-        t = self._t()
-        self._w(
-            self._runlog,
-            f"[{t:7.2f}s] 📷 {name} → {path_str}\n",
         )
 
     def finish(self, result: dict):

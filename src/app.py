@@ -24,7 +24,7 @@ from db import (
 import runner
 from runner import (
     run_session, run_queue, force_stop_all,
-    _ws_clients, _logs_ttl_loop, LOG_DIR,
+    _ws_clients, LOG_DIR,
 )
 
 @asynccontextmanager
@@ -32,15 +32,7 @@ async def lifespan(app):
     await db_init()
     await db_recover_stale()
     await db_recover_stale_queues()
-    ttl_task = asyncio.create_task(_logs_ttl_loop())
-    try:
-        yield
-    finally:
-        ttl_task.cancel()
-        try:
-            await ttl_task
-        except (asyncio.CancelledError, Exception):
-            pass
+    yield
 
 app = FastAPI(lifespan=lifespan)
 app.mount(
@@ -99,15 +91,25 @@ class ClientData(BaseModel):
     comment: str = ""
     proxy: str = ""
 
+class GroupData(BaseModel):
+    name: str = ""
+    comment: str = ""
+    urls: list[str] = []
+
 class StartQueueRequest(BaseModel):
-    urls: list[str]
+    urls: list[str] = []
+    groups: list[GroupData] = []
     clients: list[ClientData]
     claude_key: str = ""
     deepseek_key: str = ""
     ai_provider: str = "deepseek"
     rucaptcha_key: str = ""
     queue_name: str = "Проверка"
-    max_attempts: int = 3
+    max_attempts: int = 1
+    chunk_size: int = 100
+    rest_seconds: int = 180
+    browser_count: int = 2
+    tabs_per_browser: int = 2
 
 @app.get("/login")
 async def login_page():
@@ -187,15 +189,15 @@ async def api_session_export(sid: str):
 
 @app.post("/api/queue/start")
 async def api_queue_start(req: StartQueueRequest):
-    if not req.urls:
-        return {"error": "urls пустой"}
     if not req.clients:
         return {"error": "clients пустой"}
+    total_from_groups = sum(len(g.urls) for g in req.groups)
+    if not req.urls and total_from_groups == 0:
+        return {"error": "нет сайтов ни в urls, ни в группах"}
     for i, c in enumerate(req.clients):
         if not c.phone:
             return {
-                "error": f"Клиент #{i+1}: "
-                "phone не указан"
+                "error": f"Клиент #{i+1}: phone не указан"
             }
     try:
         qid = await run_queue(
@@ -205,13 +207,18 @@ async def api_queue_start(req: StartQueueRequest):
             req.queue_name, req.max_attempts,
             deepseek_key=req.deepseek_key,
             ai_provider=req.ai_provider,
+            groups=[g.model_dump() for g in req.groups],
+            chunk_size=req.chunk_size,
+            rest_seconds=req.rest_seconds,
+            browser_count=req.browser_count,
+            tabs_per_browser=req.tabs_per_browser,
         )
     except ValueError as e:
         return {"error": str(e)}
     return {
         "queue_id": qid,
         "total_clients": len(req.clients),
-        "total_urls": len(req.urls),
+        "total_urls": len(req.urls) + total_from_groups,
     }
 
 @app.get("/api/queue/active")
@@ -259,6 +266,37 @@ async def api_queue_stop():
         return {"error": "Нет активной очереди"}
     await force_stop_all()
     return {"ok": True, "queue_id": qid}
+
+@app.get("/api/queue/{qid}/success-urls")
+async def api_queue_success_urls(qid: str):
+    from db import db_get_success_urls
+    urls = await db_get_success_urls(qid)
+    body = "\n".join(urls) + ("\n" if urls else "")
+    return StreamingResponse(
+        iter([body]),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="success_{qid}.txt"'
+            ),
+        },
+    )
+
+@app.get("/api/success-urls")
+async def api_all_success_urls():
+    from db import db_get_all_success_urls
+    urls = await db_get_all_success_urls()
+    body = "\n".join(urls) + ("\n" if urls else "")
+    ts = datetime.now().strftime("%Y%m%d")
+    return StreamingResponse(
+        iter([body]),
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="success_all_{ts}.txt"'
+            ),
+        },
+    )
 
 @app.get("/api/logs/download-all")
 async def api_logs_download_all():

@@ -40,7 +40,6 @@
       overflow: hidden;
     }
 
-    /* ── Header ── */
     .header {
       background: var(--panel);
       border-bottom: 1px solid var(--border);
@@ -73,14 +72,12 @@
       margin-left: auto;
     }
 
-    /* ── Layout ── */
     .layout {
       display: flex;
       flex: 1;
       overflow: hidden;
     }
 
-    /* ── Sidebar ── */
     .sidebar {
       width: 360px;
       min-width: 300px;
@@ -129,7 +126,6 @@
       gap: 11px;
     }
 
-    /* ── Controls ── */
     label {
       font-size: 11px;
       color: var(--muted);
@@ -245,7 +241,6 @@
       margin: 2px 0;
     }
 
-    /* ── Sessions ── */
     .session-item {
       background: var(--card);
       border: 1px solid var(--border);
@@ -293,7 +288,6 @@
       color: var(--green);
     }
 
-    /* ── Main ── */
     .main {
       flex: 1;
       display: flex;
@@ -301,7 +295,6 @@
       overflow: hidden;
     }
 
-    /* ── Progress ── */
     .progress-area {
       background: var(--panel);
       border-bottom: 1px solid var(--border);
@@ -383,7 +376,6 @@
       transition: width .3s;
     }
 
-    /* ── Token counter ── */
     .token-counter {
       font-size: 11px;
       color: var(--muted);
@@ -394,7 +386,6 @@
       font-weight: 600;
     }
 
-    /* ── Toolbar ── */
     .toolbar {
       display: flex;
       align-items: center;
@@ -430,7 +421,6 @@
       align-items: center;
     }
 
-    /* ── Results table ── */
     .results-wrap {
       flex: 1;
       overflow-y: auto;
@@ -505,7 +495,6 @@
       text-decoration: underline;
     }
 
-    /* Status badges */
     .status-badge {
       display: inline-flex;
       align-items: center;
@@ -521,7 +510,6 @@
       background: rgba(34, 197, 94, .15);
       color: #4ade80;
     }
-
 
     .s-calltouch_api {
       background: rgba(79, 142, 247, .15);
@@ -570,7 +558,6 @@
       padding: 2px 6px;
       border-radius: 4px;
     }
-
 
     .vision-tag {
       font-size: 10px;
@@ -645,7 +632,6 @@
       margin-top: 4px;
     }
 
-    /* ── Empty ── */
     .empty {
       display: flex;
       flex-direction: column;
@@ -664,7 +650,6 @@
       font-size: 14px;
     }
 
-    /* ── Info block ── */
     .info-block {
       background: rgba(79, 142, 247, .07);
       border: 1px solid rgba(79, 142, 247, .2);
@@ -678,7 +663,6 @@
       color: var(--text);
     }
 
-    /* ── Client cards ── */
     .client-card {
       background: var(--card);
       border: 1px solid var(--border);
@@ -716,7 +700,6 @@
 
     input[type="number"] { width: 100%; }
 
-    /* ── Scrollbar ── */
     ::-webkit-scrollbar {
       width: 5px;
       height: 5px;
@@ -727,7 +710,6 @@
       border-radius: 3px;
     }
 
-    /* ── Toast ── */
     .toast {
       position: fixed;
       bottom: 18px;
@@ -772,7 +754,6 @@
 
   <div class="layout">
 
-    <!-- ── Sidebar ── -->
     <div class="sidebar">
       <div class="sidebar-tabs">
         <button class="sidebar-tab active" onclick="showTab('tab-new',this)">Новая проверка</button>
@@ -780,7 +761,6 @@
         <button class="sidebar-tab" onclick="showTab('tab-logs',this)">Логи</button>
       </div>
 
-      <!-- Tab: New -->
       <div id="tab-new" class="tab-pane active">
 
         <div>
@@ -788,26 +768,20 @@
           <input type="text" id="sessionName" value="Проверка" placeholder="Название для истории">
         </div>
 
-        <div>
-          <label>Список сайтов <span id="urlCount" style="color:var(--accent)"></span></label>
-          <textarea id="urlsInput" rows="7"
-            placeholder="https://clinic.ru&#10;https://stomatology.ru&#10;clinic2.ru&#10;..."
-            oninput="countUrls()"></textarea>
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <label style="margin:0;font-size:12px;font-weight:600;color:var(--accent)">Группы сайтов <span id="groupCount" style="color:var(--muted);font-weight:400"></span></label>
+          <button class="btn btn-ghost btn-sm" onclick="addGroup()">+ Группа</button>
         </div>
-
-        <div class="file-drop" onclick="document.getElementById('fileInput').click()">
-          <input type="file" id="fileInput" accept=".txt,.csv" onchange="loadFile(this)">
-          Загрузить .txt / .csv
-        </div>
+        <div id="groupsList"></div>
 
         <div class="divider"></div>
 
         <div style="display:flex;justify-content:space-between;align-items:center">
-          <label style="margin:0;font-size:12px;font-weight:600;color:var(--accent)">Клиенты <span id="clientCount" style="color:var(--muted);font-weight:400"></span></label>
+          <label style="margin:0;font-size:12px;font-weight:600;color:var(--accent)">Профили клиентов <span id="clientCount" style="color:var(--muted);font-weight:400"></span></label>
           <div style="display:flex;gap:5px">
             <button class="btn btn-ghost btn-sm" onclick="document.getElementById('csvInput').click()">CSV</button>
             <input type="file" id="csvInput" accept=".csv" onchange="loadClientsCsv(this)" style="display:none">
-            <button class="btn btn-ghost btn-sm" onclick="addClient()">+ Клиент</button>
+            <button class="btn btn-ghost btn-sm" onclick="addClient()">+ Профиль</button>
           </div>
         </div>
 
@@ -840,13 +814,28 @@
 
         <div class="form-row">
           <div>
-            <label>Макс. попыток на домен</label>
-            <input type="number" id="maxAttempts" min="1" max="6" value="3">
+            <label>Chunk (сайтов на цикл)</label>
+            <input type="number" id="chunkSize" min="10" max="1000" value="100">
+          </div>
+          <div>
+            <label>Отдых сек. между чанками</label>
+            <input type="number" id="restSeconds" min="0" max="3600" value="180">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div>
+            <label>Браузеров</label>
+            <input type="number" id="browserCount" min="1" max="4" value="2">
+          </div>
+          <div>
+            <label>Вкладок на браузер</label>
+            <input type="number" id="tabsPerBrowser" min="1" max="4" value="2">
           </div>
         </div>
 
         <div class="info-block">
-          <b>Порядок:</b> каждый клиент прогоняется по всем сайтам последовательно. Новый клиент — новый прокси. Работа с 6:30 до 22:00 МСК.
+          <b>Порядок:</b> сайты нарезаются на чанки по N штук и раздаются профилям по кругу. После каждого чанка браузеры закрываются и делают паузу. Успешные сайты кешируются, при провале передаются следующему профилю. Провалы у всех профилей — сайт выбывает.
         </div>
 
         <button class="btn btn-primary btn-full" id="startBtn" onclick="startCheck()">
@@ -855,10 +844,12 @@
         <button class="btn btn-danger btn-full" id="stopBtn" style="display:none" onclick="stopCheck()">
           Остановить
         </button>
+        <button class="btn btn-ghost btn-full" id="dlSuccessBtn" style="margin-top:6px" onclick="downloadSuccess()">
+          Скачать все успешные .txt
+        </button>
 
       </div>
 
-      <!-- Tab: History -->
       <div id="tab-history" class="tab-pane">
         <div id="sessionsList">
           <div class="empty" style="height:180px">
@@ -867,7 +858,6 @@
         </div>
       </div>
 
-      <!-- Tab: Logs -->
       <div id="tab-logs" class="tab-pane">
         <div class="info-block">
           Скачать архив со всеми <b>run.log</b> по всем сессиям. Логи хранятся 3 дня.
@@ -877,13 +867,10 @@
         </button>
       </div>
 
-
     </div>
 
-    <!-- ── Main panel ── -->
     <div class="main">
 
-      <!-- Progress -->
       <div class="progress-area">
         <div class="progress-header">
           <div>
@@ -929,7 +916,6 @@
         </div>
       </div>
 
-      <!-- Toolbar -->
       <div class="toolbar">
         <span style="font-size:11px;color:var(--muted)">Фильтр:</span>
         <button class="filter-btn active" onclick="setFilter('all',this)">Все</button>
@@ -942,7 +928,6 @@
         </div>
       </div>
 
-      <!-- Results -->
       <div class="results-wrap">
         <div id="emptyState" class="empty">
           <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -969,7 +954,6 @@
   </div>
 
   <script>
-    // ── Auth ──
     function getToken() { return localStorage.getItem('token') || ''; }
     function authHeaders() { const t = getToken(); return t ? { 'Authorization': 'Bearer ' + t } : {}; }
     function authFetch(url, opts = {}) {
@@ -978,7 +962,6 @@
     }
     function logout() { localStorage.removeItem('token'); document.cookie = 'token=; path=/; max-age=0'; window.location.href = '/login'; }
 
-    // ── State ──
     let currentSid = null;
     let currentQueueId = null;
     let ws = null;
@@ -990,7 +973,6 @@
     let clientsList = [];
     let queueTotalClients = 0;
 
-    // ── Tabs ──
     function showTab(id, btn) {
       document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
       document.querySelectorAll('.sidebar-tab').forEach(b => b.classList.remove('active'));
@@ -999,28 +981,59 @@
       if (id === 'tab-history') loadHistory();
     }
 
-    // ── AI provider switch ──
     function onProviderChange() {
       const p = document.getElementById('aiProvider').value;
       document.getElementById('claudeKeyWrap').style.display = (p === 'claude') ? '' : 'none';
       document.getElementById('deepseekKeyWrap').style.display = (p === 'deepseek') ? '' : 'none';
     }
 
-    // ── URL counter ──
-    function countUrls() {
-      const n = document.getElementById('urlsInput').value.split('\n').filter(l => l.trim()).length;
-      document.getElementById('urlCount').textContent = n ? `(${n})` : '';
+    let groupsList = [];
+
+    function addGroup() {
+      groupsList.push({ name: `Группа ${groupsList.length + 1}`, comment: '', urls: '' });
+      renderGroupsList();
     }
-    function loadFile(input) {
+    function removeGroup(idx) { groupsList.splice(idx, 1); renderGroupsList(); }
+    function updateGroup(idx, field, val) { groupsList[idx][field] = val; renderGroupsCount(); }
+    function loadGroupFile(idx, input) {
       const file = input.files[0]; if (!file) return;
       const r = new FileReader();
-      r.onload = e => { document.getElementById('urlsInput').value = e.target.result; countUrls(); toast(`Загружен: ${file.name}`); };
+      r.onload = e => { groupsList[idx].urls = e.target.result; renderGroupsList(); toast(`Загружен: ${file.name}`); };
       r.readAsText(file, 'UTF-8');
     }
+    function renderGroupsCount() {
+      const total = groupsList.reduce((s, g) => s + g.urls.split('\n').filter(l => l.trim()).length, 0);
+      document.getElementById('groupCount').textContent = `(${groupsList.length} гр. / ${total} сайтов)`;
+    }
+    function renderGroupsList() {
+      const c = document.getElementById('groupsList');
+      if (!groupsList.length) {
+        c.innerHTML = '<div style="color:var(--muted);font-size:12px;text-align:center;padding:8px">Нажмите «+ Группа»</div>';
+        renderGroupsCount();
+        return;
+      }
+      c.innerHTML = groupsList.map((g, i) => {
+        const cnt = g.urls.split('\n').filter(l => l.trim()).length;
+        return `
+        <div class="client-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+            <span style="font-size:11px;font-weight:600;color:var(--accent)">Группа #${i + 1} <span style="color:var(--muted);font-weight:400">(${cnt})</span></span>
+            <button class="btn btn-ghost btn-sm" style="padding:2px 6px;font-size:13px;line-height:1" onclick="removeGroup(${i})">&times;</button>
+          </div>
+          <div><label>Название</label><input type="text" value="${esc(g.name)}" oninput="updateGroup(${i},'name',this.value)"></div>
+          <div><label>Комментарий (уходит в форму)</label><input type="text" value="${esc(g.comment)}" oninput="updateGroup(${i},'comment',this.value)" placeholder="Хочу виниры..."></div>
+          <div><label>Список сайтов</label><textarea rows="4" oninput="updateGroup(${i},'urls',this.value); renderGroupsCount()" placeholder="https://site1.ru&#10;https://site2.ru">${esc(g.urls)}</textarea></div>
+          <div class="file-drop" onclick="document.getElementById('gf-${i}').click()" style="margin-top:4px">
+            <input type="file" id="gf-${i}" accept=".txt,.csv" onchange="loadGroupFile(${i}, this)">
+            Загрузить .txt / .csv
+          </div>
+        </div>`;
+      }).join('');
+      renderGroupsCount();
+    }
 
-    // ── Clients ──
     function addClient() {
-      clientsList.push({ phone: '', firstname: '', lastname: '', patronymic: '', email: '', comment: '', proxy: '' });
+      clientsList.push({ phone: '', firstname: '', lastname: '', patronymic: '', email: '', proxy: '' });
       renderClientsList();
     }
     function removeClient(idx) {
@@ -1032,11 +1045,11 @@
     function renderClientsList() {
       const c = document.getElementById('clientsList');
       document.getElementById('clientCount').textContent = clientsList.length ? `(${clientsList.length})` : '';
-      if (!clientsList.length) { c.innerHTML = '<div style="color:var(--muted);font-size:12px;text-align:center;padding:8px">Нажмите «+ Клиент» или загрузите CSV</div>'; return; }
+      if (!clientsList.length) { c.innerHTML = '<div style="color:var(--muted);font-size:12px;text-align:center;padding:8px">Нажмите «+ Профиль» или загрузите CSV</div>'; return; }
       c.innerHTML = clientsList.map((cl, i) => `
         <div class="client-card">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-            <span style="font-size:11px;font-weight:600;color:var(--accent)">Клиент #${i + 1}</span>
+            <span style="font-size:11px;font-weight:600;color:var(--accent)">Профиль #${i + 1}</span>
             <button class="btn btn-ghost btn-sm" style="padding:2px 6px;font-size:13px;line-height:1" onclick="removeClient(${i})">&times;</button>
           </div>
           <div class="form-row">
@@ -1050,7 +1063,6 @@
           </div>
           <div class="form-row">
             <div><label>Email</label><input type="email" value="${esc(cl.email)}" onchange="updateClient(${i},'email',this.value)"></div>
-            <div><label>Комментарий</label><input type="text" value="${esc(cl.comment)}" onchange="updateClient(${i},'comment',this.value)"></div>
           </div>
         </div>`).join('');
     }
@@ -1071,26 +1083,35 @@
       input.value = '';
     }
 
-    // ── Start ──
     async function startCheck() {
-      const urlsRaw = document.getElementById('urlsInput').value.trim();
-      if (!urlsRaw) { toast('Введите список сайтов'); return; }
-      const urls = urlsRaw.split('\n').map(u => u.trim()).filter(Boolean);
-      if (!urls.length) { toast('Нет URL'); return; }
-      if (!clientsList.length) { toast('Добавьте хотя бы одного клиента'); return; }
+      const groups = groupsList
+        .map(g => ({
+          name: g.name || '',
+          comment: g.comment || '',
+          urls: g.urls.split('\n').map(u => u.trim()).filter(Boolean),
+        }))
+        .filter(g => g.urls.length);
+      const totalUrls = groups.reduce((s, g) => s + g.urls.length, 0);
+      if (!totalUrls) { toast('Добавьте хотя бы одну группу с сайтами'); return; }
+      if (!clientsList.length) { toast('Добавьте хотя бы одного профиля'); return; }
       for (let i = 0; i < clientsList.length; i++) {
-        if (!clientsList[i].phone) { toast(`Клиент #${i + 1}: укажите телефон`); return; }
+        if (!clientsList[i].phone) { toast(`Профиль #${i + 1}: укажите телефон`); return; }
       }
 
       const body = {
         queue_name: document.getElementById('sessionName').value.trim() || 'Проверка',
-        urls,
+        urls: [],
+        groups,
         clients: clientsList,
         ai_provider: document.getElementById('aiProvider').value,
         claude_key: document.getElementById('claudeKey').value.trim(),
         deepseek_key: document.getElementById('deepseekKey').value.trim(),
         rucaptcha_key: document.getElementById('rucaptchaKey').value.trim(),
-        max_attempts: parseInt(document.getElementById('maxAttempts').value || '3', 10),
+        max_attempts: 1,
+        chunk_size: parseInt(document.getElementById('chunkSize').value || '100', 10),
+        rest_seconds: parseInt(document.getElementById('restSeconds').value || '180', 10),
+        browser_count: parseInt(document.getElementById('browserCount').value || '2', 10),
+        tabs_per_browser: parseInt(document.getElementById('tabsPerBrowser').value || '2', 10),
       };
 
       let data;
@@ -1101,9 +1122,10 @@
       if (data.error) { toast(data.error); return; }
 
       currentQueueId = data.queue_id;
+      lastQueueId = data.queue_id;
       queueTotalClients = data.total_clients;
-      resetResults(data.total_urls * data.total_clients);
-      setTitle(`Запуск: ${data.total_clients} клиентов, ${data.total_urls} сайтов...`);
+      resetResults(data.total_urls);
+      setTitle(`Запуск: ${data.total_clients} профилей, ${data.total_urls} сайтов...`);
       document.getElementById('startBtn').style.display = 'none';
       document.getElementById('stopBtn').style.display = '';
       document.getElementById('exportBtn').disabled = true;
@@ -1111,7 +1133,6 @@
       connectWs(currentQueueId, true);
     }
 
-    // ── Queue progress ──
     function showQueueProgress(totalClients) {
       queueTotalClients = totalClients;
       const el = document.getElementById('queueProgress');
@@ -1131,7 +1152,6 @@
       if (el) { el.className = `cp-item cp-${status}`; }
     }
 
-    // ── WebSocket ──
     function connectWs(id, isQueue) {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const wsToken = getToken();
@@ -1141,16 +1161,19 @@
         const msg = JSON.parse(e.data);
         switch (msg.type) {
           case 'queue_start':
-            stats.total = msg.total_urls * msg.total_clients;
-            setTitle(`Очередь: ${msg.total_clients} клиентов, ${msg.total_urls} сайтов`);
+            stats.total = msg.total_urls;
+            setTitle(`Очередь: ${msg.total_clients} профилей, ${msg.total_urls} сайтов, chunk=${msg.chunk_size||'?'}`);
             break;
-          case 'client_start':
+          case 'chunk_start':
             updateClientProgress(msg.client_position, 'running');
-            setTitle(`Клиент ${msg.client_position + 1}/${queueTotalClients}: ${msg.client_name}`);
             currentSid = msg.session_id;
+            setTitle(`Профиль #${msg.client_position + 1}: чанк ${msg.chunk_size}, осталось ${msg.remaining_sites}`);
             break;
-          case 'client_done':
-            updateClientProgress(msg.client_position, 'done');
+          case 'chunk_done':
+            setTitle(`Чанк готов, осталось ${msg.remaining_sites} сайтов`);
+            break;
+          case 'rest':
+            setTitle(`Отдых ${msg.seconds} сек между чанками...`);
             break;
           case 'start':
             stats.total = msg.total;
@@ -1158,7 +1181,7 @@
             break;
           case 'attempt': {
             const host = (msg.url || '').replace(/^https?:\/\//, '').split('/')[0];
-            setTitle(`Проверка: ${host} (${msg.attempt_no}/${msg.max_attempts})`);
+            setTitle(`Проверка: ${host}`);
             break;
           }
           case 'result':
@@ -1181,7 +1204,6 @@
       ws.onclose = () => { if (document.getElementById('stopBtn').style.display !== 'none' && !currentQueueId) onDone(); };
     }
 
-    // ── Results ──
     function resetResults(total) {
       allRows = []; rowIndex = 0; domainAttemptState = {};
       stats = { total, success: 0, captcha: 0, failed: 0, uncertain: 0, done: 0, tokens: 0 };
@@ -1276,7 +1298,6 @@
       finally { btn.disabled = false; btn.textContent = oldText; }
     }
 
-    // ── Filter ──
     function setFilter(f, btn) {
       activeFilter = f;
       document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
@@ -1288,7 +1309,6 @@
       [...allRows].reverse().forEach(r => { if (matchFilter(r)) renderRow(r, false); });
     }
 
-    // ── Stats ──
     function updateStats() {
       document.getElementById('statTotal').textContent = stats.total;
       document.getElementById('statSuccess').textContent = stats.success;
@@ -1303,7 +1323,8 @@
     }
     function setTitle(t) { document.getElementById('progressTitle').textContent = t; }
 
-    // ── Done ──
+    let lastQueueId = null;
+
     function onDone() {
       document.getElementById('startBtn').style.display = '';
       document.getElementById('stopBtn').style.display = 'none';
@@ -1325,10 +1346,24 @@
       }
     }
 
-    // ── Export ──
+    async function downloadSuccess() {
+      try {
+        const resp = await authFetch('/api/success-urls');
+        if (!resp.ok) { toast('Ошибка скачивания'); return; }
+        const blob = await resp.blob();
+        const cd = resp.headers.get('Content-Disposition') || '';
+        const m = cd.match(/filename="?([^";]+)"?/i);
+        const fname = m ? m[1] : 'success_all.txt';
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = fname;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (e) { toast('Ошибка скачивания'); }
+    }
+
     function exportCsv() { if (currentSid) window.location.href = `/api/sessions/${currentSid}/export`; }
 
-    // ── History ──
     async function loadHistory() {
       const c = document.getElementById('sessionsList');
       let sessions;
@@ -1381,24 +1416,24 @@
       showTab('tab-new', document.querySelectorAll('.sidebar-tab')[0]);
     }
 
-    // ── Session persistence ──
     async function checkActiveQueue() {
       try {
         const r = await authFetch('/api/queue/active');
         const data = await r.json();
         if (!data.active) return false;
         currentQueueId = data.queue.id;
+        lastQueueId = data.queue.id;
         const clients = data.clients || [];
         const urls = JSON.parse(data.queue.urls || '[]');
         queueTotalClients = clients.length;
 
         clientsList = clients.map(c => ({
           phone: c.phone, firstname: c.firstname, lastname: c.lastname,
-          patronymic: c.patronymic, email: c.email, comment: c.comment, proxy: c.proxy,
+          patronymic: c.patronymic, email: c.email, proxy: c.proxy,
         }));
         renderClientsList();
 
-        resetResults(urls.length * clients.length);
+        resetResults(urls.length);
         showQueueProgress(clients.length);
 
         for (const c of clients) {
@@ -1422,13 +1457,12 @@
         document.getElementById('stopBtn').style.display = '';
         const status = data.queue.status;
         if (status === 'paused_hours') setTitle('Пауза: рабочие часы МСК 6:30–22:00');
-        else setTitle(`Очередь: ${data.queue.done_clients}/${clients.length} клиентов обработано`);
+        else setTitle(`Очередь: осталось ~${urls.length - stats.done} сайтов`);
         connectWs(currentQueueId, true);
         return true;
       } catch (e) { return false; }
     }
 
-    // ── Restore last completed queue ──
     async function checkLastQueue() {
       try {
         const r = await authFetch('/api/queue/last');
@@ -1437,16 +1471,17 @@
         const queue = data.queue;
         if (queue.status === 'running' || queue.status === 'paused_hours') return false;
 
+        lastQueueId = queue.id;
         const clients = data.clients || [];
         const urls = JSON.parse(queue.urls || '[]');
 
         clientsList = clients.map(c => ({
           phone: c.phone, firstname: c.firstname, lastname: c.lastname,
-          patronymic: c.patronymic, email: c.email, comment: c.comment, proxy: c.proxy,
+          patronymic: c.patronymic, email: c.email, proxy: c.proxy,
         }));
         renderClientsList();
 
-        resetResults(urls.length * clients.length);
+        resetResults(urls.length);
         showQueueProgress(clients.length);
 
         for (const c of clients) {
@@ -1471,14 +1506,12 @@
       } catch (e) { return false; }
     }
 
-    // ── Helpers ──
     function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
     function fmtDate(s) { if (!s) return ''; const d = new Date(s.replace(' ', 'T')); return isNaN(d) ? s : d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); }
     function toast(msg, ms = 3000) { const el = document.createElement('div'); el.className = 'toast'; el.textContent = msg; document.body.appendChild(el); setTimeout(() => el.remove(), ms); }
 
-    // ── Init ──
     (async function () {
-      countUrls();
+      renderGroupsList();
       renderClientsList();
       const restored = await checkActiveQueue();
       if (!restored) {

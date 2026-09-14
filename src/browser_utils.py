@@ -10,7 +10,6 @@ STEALTH_UA = (
 )
 
 STEALTH_JS = r"""() => {
-    // navigator.webdriver -> undefined
     try {
         Object.defineProperty(navigator, 'webdriver', {
             get: () => undefined,
@@ -18,7 +17,6 @@ STEALTH_JS = r"""() => {
         });
     } catch (e) {}
 
-    // Языки как у живого RU-браузера
     try {
         Object.defineProperty(navigator, 'languages', {
             get: () => ['ru-RU', 'ru', 'en-US', 'en'],
@@ -26,7 +24,6 @@ STEALTH_JS = r"""() => {
         });
     } catch (e) {}
 
-    // Консистентная платформа
     try {
         Object.defineProperty(navigator, 'platform', {
             get: () => 'Win32',
@@ -34,7 +31,6 @@ STEALTH_JS = r"""() => {
         });
     } catch (e) {}
 
-    // Разумные аппаратные характеристики
     try {
         Object.defineProperty(
             navigator, 'hardwareConcurrency', {
@@ -49,7 +45,6 @@ STEALTH_JS = r"""() => {
         });
     } catch (e) {}
 
-    // Непустые plugins / mimeTypes
     try {
         const mkPlugin = (name, filename, desc) => ({
             name: name,
@@ -93,7 +88,6 @@ STEALTH_JS = r"""() => {
         });
     } catch (e) {}
 
-    // window.chrome = { runtime: {} }
     try {
         if (!window.chrome) {
             window.chrome = { runtime: {} };
@@ -102,7 +96,6 @@ STEALTH_JS = r"""() => {
         }
     } catch (e) {}
 
-    // permissions.query: notifications -> denied, без throw
     try {
         const perms = navigator.permissions;
         const orig = perms && perms.query;
@@ -138,50 +131,8 @@ def build_stealth_context_kwargs(base=None):
         }
     return kwargs
 
-async def step_shot(
-    page, name, step_dir, form_el=None,
-):
-    if step_dir is None:
-        return
-    try:
-        from logger import get_logger
-        path_str = str(step_dir / f"{name}.jpg")
-
-        if "after_submit" in name and form_el:
-            try:
-                if await form_el.is_visible():
-                    await form_el.scroll_into_view_if_needed()
-                else:
-                    for sel in [
-                        '.success', '[class*="thank" i]',
-                        '.alert', '[class*="success" i]',
-                    ]:
-                        el = await page.query_selector(
-                            sel
-                        )
-                        if el and await el.is_visible():
-                            await el.scroll_into_view_if_needed()
-                            break
-            except Exception:
-                pass
-
-        try:
-            await page.screenshot(
-                path=path_str, type="jpeg",
-                quality=75,
-                full_page=False, timeout=6000,
-            )
-        except Exception:
-            await page.screenshot(
-                path=path_str, type="jpeg",
-                quality=60,
-                full_page=True, timeout=8000,
-            )
-
-        if log := get_logger():
-            log.log_shot(name, path_str)
-    except Exception:
-        pass
+async def step_shot(page, name, step_dir, form_el=None):
+    return
 
 async def dismiss_cookie_banners(
     page, cookie_selector=None
@@ -377,7 +328,6 @@ async def dismiss_popups(page, form_el=None):
                 'принять','accept','ok','ок',
                 'понятно','согласен','agree','allow',
             ]);
-            // Cookie баннеры
             for (const sel of [
                 '[class*="cookie" i]',
                 '[id*="cookie" i]',
@@ -402,7 +352,6 @@ async def dismiss_popups(page, form_el=None):
                     }
                 }
             }
-            // Промо-попапы
             for (const sel of [
                 '[class*="popup" i]:not(nav)',
                 '[class*="modal" i]:not(nav)',

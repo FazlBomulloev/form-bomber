@@ -1,0 +1,14 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "layout-transition",
+        "value": "width",
+        "createdAt": "2026-09-14T09:50:50.001Z",
+        "reason": "progress bar width transition on rarely-changing value (per-result WS update), acceptable perf; existing code from prior version, not modified in this session"
+      }
+    ]
+  }
+}
