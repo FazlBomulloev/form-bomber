@@ -29,17 +29,41 @@ async def _get_calltouch_cookies(page):
     cookies = await page.context.cookies()
     session_id = None
     site_id = None
+    widget_hash = None
     for c in cookies:
         if c["name"] == "_ct_session_id":
             session_id = c["value"]
         elif c["name"] == "_ct_site_id":
             site_id = c["value"]
-    return session_id, site_id
+        elif c["name"] == "_ct_ids":
+            v = c.get("value") or ""
+            v = v.replace("%3A", ":")
+            parts = v.split(":")
+            if parts and parts[0]:
+                widget_hash = parts[0]
+    if not widget_hash:
+        try:
+            widget_hash = await page.evaluate(r"""() => {
+                for (const s of document.querySelectorAll(
+                    'script[src*="calltouch"]')) {
+                    const m = (s.src||'').match(
+                        /[?&]id=([A-Za-z0-9]+)/);
+                    if (m) return m[1];
+                }
+                for (const k of Object.keys(window)) {
+                    const m = k.match(/^ctw_([A-Za-z0-9]+)$/);
+                    if (m) return m[1];
+                }
+                return null;
+            }""")
+        except Exception:
+            widget_hash = None
+    return session_id, site_id, widget_hash
 
 async def try_calltouch(page, phone, name=""):
     log = get_logger()
-    session_id, site_id = await _get_calltouch_cookies(
-        page
+    session_id, site_id, widget_hash = (
+        await _get_calltouch_cookies(page)
     )
     if not session_id or not site_id:
         if log:
@@ -53,7 +77,9 @@ async def try_calltouch(page, phone, name=""):
     if log:
         log.step(
             "calltouch",
-            f"site={site_id}, session={session_id[:8]}",
+            f"site={site_id}, session={session_id[:8]}"
+            + (f", widget={widget_hash}"
+               if widget_hash else ""),
         )
 
     hidden_data = await _collect_hidden_fields(page)
@@ -78,33 +104,60 @@ async def try_calltouch(page, phone, name=""):
         async with aiohttp.ClientSession(
             timeout=_TIMEOUT
         ) as s:
-            async with s.post(
-                _LOAD_URL,
-                json={
+            load_data = None
+            for widget_types in (
+                ["callback"],
+                ["callback", "request"],
+                ["request"],
+            ):
+                payload = {
                     "siteId": site_id,
                     "sessionId": session_id,
-                    "widgetTypes": ["callback"],
-                },
-            ) as r:
-                load_data = await r.json(
-                    content_type=None
-                )
+                    "widgetTypes": widget_types,
+                }
+                if widget_hash:
+                    payload["widgetHash"] = widget_hash
+                    payload["siteHash"] = widget_hash
+                try:
+                    async with s.post(
+                        _LOAD_URL, json=payload,
+                    ) as r:
+                        cand = await r.json(
+                            content_type=None,
+                        )
+                except Exception:
+                    cand = None
+                if not cand:
+                    continue
+                items = cand
+                if isinstance(cand, dict) \
+                        and "widgets" in cand:
+                    items = cand["widgets"]
+                if isinstance(items, list):
+                    for it in items:
+                        if isinstance(it, dict) \
+                                and it.get("widgetId") \
+                                and it.get("showId"):
+                            load_data = it
+                            break
+                elif isinstance(cand, dict) \
+                        and cand.get("widgetId") \
+                        and cand.get("showId"):
+                    load_data = cand
+                if load_data:
+                    break
 
             if not load_data:
                 if log:
-                    log.warn("calltouch: load пустой ответ")
+                    log.warn(
+                        "calltouch: нет showId/widgetId "
+                        f"(hash={widget_hash or 'none'})"
+                    )
                 return None
 
             show_id = load_data.get("showId")
             widget_id = load_data.get("widgetId")
             unit_id = load_data.get("unitId")
-
-            if not show_id or not widget_id:
-                if log:
-                    log.warn(
-                        "calltouch: нет showId/widgetId"
-                    )
-                return None
 
             call_payload = {
                 "siteId": site_id,

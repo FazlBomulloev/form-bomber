@@ -2243,8 +2243,13 @@ async def _click_form_submit(page, form_el):
         'button[type="submit"]',
         'input[type="submit"]',
         '.sbut',
+        '.t-submit',
         '[class*="submit" i]',
-        'button:not([type])',
+        '[class*="feedback__btn" i]',
+        '[class*="btn-submit" i]',
+        '[class*="form__submit" i]',
+        '[class*="form-submit" i]',
+        'button:not([type="button"]):not([type="reset"])',
         'button',
     ]
     for sel in prio:
@@ -2257,6 +2262,76 @@ async def _click_form_submit(page, form_el):
                 return sel
         except Exception:
             continue
+
+    try:
+        clicked = await page.evaluate(
+            r"""(form) => {
+                if (!form) return null;
+                const KEYS = [
+                    'отправ','запис','заказ','получ',
+                    'запрос','связат','перезвон',
+                    'заплан','оставить','запросить',
+                    'submit','send',
+                ];
+                const parents = [form];
+                let cur = form.parentElement;
+                for (let i=0; i<5 && cur; i++) {
+                    parents.push(cur);
+                    cur = cur.parentElement;
+                }
+                for (const scope of parents) {
+                    const btns = scope.querySelectorAll(
+                        'button, a.btn, div.btn, '
+                        + 'span.btn, [role="button"], '
+                        + '[class*="btn" i]'
+                    );
+                    for (const b of btns) {
+                        const st = getComputedStyle(b);
+                        if (st.display === 'none'
+                            || st.visibility === 'hidden'
+                            || st.opacity === '0') continue;
+                        const r = b.getBoundingClientRect();
+                        if (r.width < 30 || r.height < 15)
+                            continue;
+                        const t = (
+                            b.innerText || b.value || ''
+                        ).trim().toLowerCase();
+                        if (t.length > 60) continue;
+                        if (b.type === 'reset'
+                            || b.type === 'button') {
+                            const cls = (
+                                b.className || ''
+                            ).toString().toLowerCase();
+                            if (!/submit|btn-submit|feedback__btn/.test(cls))
+                                continue;
+                        }
+                        if (KEYS.some(k => t.includes(k))) {
+                            try { b.click(); }
+                            catch(e) {}
+                            try {
+                                b.dispatchEvent(
+                                    new MouseEvent('click',
+                                    {bubbles:true,
+                                     cancelable:true,
+                                     view:window})
+                                );
+                            } catch(e) {}
+                            return (b.className || '')
+                                .toString()
+                                .split(' ').filter(Boolean)
+                                .slice(0,2).join('.')
+                                || b.tagName.toLowerCase();
+                        }
+                    }
+                }
+                return null;
+            }""",
+            form_el,
+        )
+        if clicked:
+            return f"text_scan:{clicked}"
+    except Exception:
+        pass
     return None
 
 async def _escalate_submit(page, form_el, pred):

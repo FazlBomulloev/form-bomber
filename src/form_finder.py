@@ -1016,52 +1016,64 @@ async def extract_forms(
 
             appeared = (
                 await _wait_form_after_trigger(
-                    search_page, timeout=8000,
+                    search_page, timeout=12000,
                 )
             )
+            accepted = False
             if appeared:
-                await asyncio.sleep(0.5)
-                form_json = (
-                    await extract_form_json(
-                        search_page,
+                for _retry in range(2):
+                    await asyncio.sleep(
+                        0.5 if _retry == 0 else 1.5
                     )
-                )
-                if (
-                    form_json
-                    and form_json.get("fields")
-                ):
-                    has_phone = any(
-                        f.get("role") == "phone"
-                        for f in form_json["fields"]
-                    )
-                    if has_phone and await _accept_form(
-                        search_page, form_json, log,
-                    ):
-                        if log:
-                            log.ok(
-                                f"форма после "
-                                f"«{text[:25]}»: "
-                                f"{len(form_json['fields'])}"
-                                f" полей"
-                            )
-                        ctx_src = "trigger"
-                        frame = None
-                        if new_tab:
-                            ctx_src = "trigger_new_tab"
-                            frame = new_tab
-                        return form_json, FormContext(
-                            html="",
-                            source=ctx_src,
-                            trigger_text=text[:50],
-                            frame=frame,
+                    form_json = (
+                        await extract_form_json(
+                            search_page,
                         )
+                    )
+                    if (
+                        form_json
+                        and form_json.get("fields")
+                    ):
+                        has_phone = any(
+                            f.get("role") == "phone"
+                            for f in form_json["fields"]
+                        )
+                        if (
+                            has_phone
+                            and await _accept_form(
+                                search_page, form_json, log,
+                            )
+                        ):
+                            if log:
+                                log.ok(
+                                    f"форма после "
+                                    f"«{text[:25]}»: "
+                                    f"{len(form_json['fields'])}"
+                                    f" полей"
+                                )
+                            ctx_src = "trigger"
+                            frame = None
+                            if new_tab:
+                                ctx_src = "trigger_new_tab"
+                                frame = new_tab
+                            return form_json, FormContext(
+                                html="",
+                                source=ctx_src,
+                                trigger_text=text[:50],
+                                frame=frame,
+                            )
+                    if _retry == 0 and not (
+                        form_json and form_json.get("fields")
+                    ):
+                        continue
+                    break
 
             if new_tab:
                 try:
                     await new_tab.close()
                 except Exception:
                     pass
-            else:
+            elif not appeared:
                 try:
                     await page.keyboard.press(
                         'Escape',
