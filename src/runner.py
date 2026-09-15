@@ -41,14 +41,17 @@ from browser_utils import (
     dismiss_cookie_banners, suppress_widgets,
     has_calltouch, step_shot,
     apply_stealth, build_stealth_context_kwargs,
+    install_resource_blocker,
 )
 from calltouch import try_calltouch
 
 _ai_sem = asyncio.Semaphore(AI_CONCURRENCY)
 _ws_clients: set = set()
 _browsers: list = []
+_browser_use_count: list = []
 _pw = None
 _browser_lock = asyncio.Lock()
+BROWSER_RECYCLE_AFTER = 15
 _active_queue_id: str | None = None
 _queue_cancel = asyncio.Event()
 _active_tasks: set = set()
@@ -320,13 +323,14 @@ def parse_proxy(raw: str) -> dict | None:
     return None
 
 async def _reset_browsers():
-    global _browsers, _pw
+    global _browsers, _browser_use_count, _pw
     for br in list(_browsers):
         try:
             await br.close()
         except Exception:
             pass
     _browsers = []
+    _browser_use_count = []
     try:
         if _pw:
             await _pw.stop()
@@ -335,16 +339,29 @@ async def _reset_browsers():
     _pw = None
 
 async def _ensure_browsers(count: int = 2):
-    global _browsers, _pw
+    global _browsers, _browser_use_count, _pw
     async with _browser_lock:
         alive = []
-        for br in _browsers:
+        alive_counts = []
+        for i, br in enumerate(_browsers):
             try:
                 br.contexts
+                cnt = (
+                    _browser_use_count[i]
+                    if i < len(_browser_use_count) else 0
+                )
+                if cnt >= BROWSER_RECYCLE_AFTER:
+                    try:
+                        await br.close()
+                    except Exception:
+                        pass
+                    continue
                 alive.append(br)
+                alive_counts.append(cnt)
             except Exception:
                 pass
         _browsers = alive
+        _browser_use_count = alive_counts
         if len(_browsers) >= count:
             return _browsers[:count]
         if _pw is None:
@@ -355,14 +372,39 @@ async def _ensure_browsers(count: int = 2):
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
+                    "--disable-dev-shm-usage",
                 ],
             )
             _browsers.append(br)
+            _browser_use_count.append(0)
         return _browsers[:count]
 
 async def _get_browser(idx: int = 0):
     browsers = await _ensure_browsers(max(1, idx + 1))
-    return browsers[idx % len(browsers)]
+    real_idx = idx % len(browsers)
+    if real_idx < len(_browser_use_count):
+        _browser_use_count[real_idx] += 1
+    return browsers[real_idx]
+
+async def _recycle_browser_if_needed(idx: int = 0):
+    global _browsers, _browser_use_count
+    async with _browser_lock:
+        if idx < 0 or idx >= len(_browsers):
+            return
+        cnt = (
+            _browser_use_count[idx]
+            if idx < len(_browser_use_count) else 0
+        )
+        if cnt < BROWSER_RECYCLE_AFTER:
+            return
+        br = _browsers[idx]
+        try:
+            await br.close()
+        except Exception:
+            pass
+        _browsers.pop(idx)
+        if idx < len(_browser_use_count):
+            _browser_use_count.pop(idx)
 
 async def _ws_broadcast(data: dict):
     msg = json.dumps(data, ensure_ascii=False)
@@ -618,6 +660,7 @@ async def check_site_v2(
                     **ctx_kwargs,
                 )
                 await apply_stealth(ctx)
+                await install_resource_blocker(ctx)
                 _active_contexts.add(ctx)
                 page = await ctx.new_page()
                 break
@@ -663,6 +706,7 @@ async def check_site_v2(
                             **ctx_kwargs,
                         )
                         await apply_stealth(ctx)
+                        await install_resource_blocker(ctx)
                         _active_contexts.add(ctx)
                         page = await ctx.new_page()
                         await asyncio.sleep(1)
@@ -1010,6 +1054,10 @@ async def check_site_v2(
                     await ctx.close()
                 except Exception:
                     pass
+            try:
+                await _recycle_browser_if_needed(browser_idx)
+            except Exception:
+                pass
 
     except asyncio.CancelledError:
         result["status"] = "cancelled"

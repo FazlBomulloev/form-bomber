@@ -119,6 +119,68 @@ async def apply_stealth(context):
     except Exception:
         return False
 
+_BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
+
+_BLOCKED_URL_SUBSTRINGS = (
+    "googletagmanager.com",
+    "google-analytics.com",
+    "googleadservices.com",
+    "googlesyndication.com",
+    "doubleclick.net",
+    "connect.facebook.net",
+    "facebook.com/tr",
+    "mc.yandex.ru/metrika",
+    "mc.yandex.ru/watch",
+    "top-fwz1.mail.ru",
+    "counter.yadro.ru",
+    "jivo.chat",
+    "jivosite.com",
+    "tawk.to",
+    "crisp.chat",
+    "livetex.ru",
+    "callibri.ru",
+    "carrotquest.io",
+    "roistat.com",
+    "comagic.ru",
+    "mango-office.ru",
+    "envybox.io",
+    "zendesk.com",
+    "intercom.io",
+    "hotjar.com",
+    "smartlook.com",
+    "segment.io",
+    "mixpanel.com",
+    "amplitude.com",
+    "yandex.ru/ads",
+    "an.yandex.ru",
+    "vk.com/rtrg",
+    "top100.rambler.ru",
+)
+
+async def install_resource_blocker(context):
+    async def _route(route):
+        try:
+            req = route.request
+            if req.resource_type in _BLOCKED_RESOURCE_TYPES:
+                await route.abort()
+                return
+            u = req.url
+            for pat in _BLOCKED_URL_SUBSTRINGS:
+                if pat in u:
+                    await route.abort()
+                    return
+            await route.continue_()
+        except Exception:
+            try:
+                await route.continue_()
+            except Exception:
+                pass
+    try:
+        await context.route("**/*", _route)
+        return True
+    except Exception:
+        return False
+
 def build_stealth_context_kwargs(base=None):
     kwargs = dict(base) if base else {}
     kwargs.setdefault("user_agent", STEALTH_UA)
