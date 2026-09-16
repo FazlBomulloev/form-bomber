@@ -1,10 +1,18 @@
 import aiohttp
+from urllib.parse import urlparse
 
 from logger import get_logger
 
 _TIMEOUT = aiohttp.ClientTimeout(total=20)
 _LOAD_URL = "https://mod.calltouch.ru/callback_load.php"
 _CALL_URL = "https://mod.calltouch.ru/callback_call.php"
+
+
+def _to_int(v, default=0):
+    try:
+        return int(str(v))
+    except Exception:
+        return default
 
 async def _collect_hidden_fields(page):
     try:
@@ -100,27 +108,80 @@ async def try_calltouch(page, phone, name=""):
                 "(csrf/token не найден)",
             )
 
+    site_id_int = _to_int(site_id)
+    session_id_int = _to_int(session_id)
+    if not site_id_int or not session_id_int:
+        if log:
+            log.warn(
+                "calltouch: siteId/sessionId не int "
+                f"(site={site_id}, session={session_id})"
+            )
+        return None
+
+    page_url = page.url
+    parsed = urlparse(page_url)
+    origin = (
+        f"{parsed.scheme}://{parsed.netloc}"
+        if parsed.scheme else ""
+    )
+    referer = page_url
+
+    session_data = {
+        "id": session_id_int,
+        "url": page_url,
+        "source": "(direct)",
+        "medium": "(none)",
+        "utmCampaign": "",
+        "deviceType": "desktop",
+        "pools": [],
+        "geoCity": None,
+        "geoRegion": None,
+        "geoCountry": None,
+        "daysSinceLastVisit": 1,
+        "geoTimezone": None,
+    }
+
+    headers = {
+        "accept": "*/*",
+        "accept-language": (
+            "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+        ),
+        "content-type": "application/json",
+        "origin": origin,
+        "referer": referer,
+        "user-agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/152.0.0.0 Safari/537.36"
+        ),
+    }
+
     try:
         async with aiohttp.ClientSession(
             timeout=_TIMEOUT
         ) as s:
             load_data = None
             for widget_types in (
+                ["callback", "wheel-fortune"],
                 ["callback"],
                 ["callback", "request"],
-                ["request"],
             ):
                 payload = {
-                    "siteId": site_id,
-                    "sessionId": session_id,
+                    "siteId": site_id_int,
+                    "sessionId": session_id_int,
+                    "sessionData": session_data,
                     "widgetTypes": widget_types,
+                    "isMobileDevice": False,
+                    "host": "mod.calltouch.ru",
+                    "ctObject": "ct",
                 }
                 if widget_hash:
                     payload["widgetHash"] = widget_hash
-                    payload["siteHash"] = widget_hash
                 try:
                     async with s.post(
-                        _LOAD_URL, json=payload,
+                        _LOAD_URL,
+                        json=payload,
+                        headers=headers,
                     ) as r:
                         cand = await r.json(
                             content_type=None,
@@ -160,15 +221,16 @@ async def try_calltouch(page, phone, name=""):
             unit_id = load_data.get("unitId")
 
             call_payload = {
-                "siteId": site_id,
+                "siteId": site_id_int,
                 "widgetId": widget_id,
-                "sessionId": session_id,
+                "sessionId": session_id_int,
                 "showId": show_id,
                 "phone": phone,
                 "name": name,
                 "unitId": unit_id,
                 "callbackPeriod": "now",
                 "personalDataAgreement": True,
+                "sessionData": session_data,
             }
             for hk, hv in hidden_fields.items():
                 if hk not in call_payload:
@@ -177,6 +239,7 @@ async def try_calltouch(page, phone, name=""):
             async with s.post(
                 _CALL_URL,
                 json=call_payload,
+                headers=headers,
             ) as r2:
                 call_data = await r2.json(
                     content_type=None
