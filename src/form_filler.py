@@ -2339,7 +2339,7 @@ async def _escalate_submit(page, form_el, pred):
     resp_task = None
     try:
         resp_task = asyncio.ensure_future(
-            page.wait_for_response(pred, timeout=8000)
+            page.wait_for_response(pred, timeout=20000)
         )
         await asyncio.sleep(0)
     except Exception:
@@ -2527,7 +2527,7 @@ async def submit_with_retry(
         state = dom.get("state", "unchanged")
 
         if state in ("unchanged", "likely_failed"):
-            poll_deadline = time.monotonic() + 10
+            poll_deadline = time.monotonic() + 25
             while time.monotonic() < poll_deadline:
                 await asyncio.sleep(0.7)
                 post_url2 = page.url
@@ -2624,6 +2624,39 @@ async def submit_with_retry(
                 ):
                     dom = dom_e
                     state = se
+
+            late_deadline = time.monotonic() + 15
+            while time.monotonic() < late_deadline:
+                await asyncio.sleep(0.9)
+                try:
+                    dom_late = (
+                        await detect_submission_result(
+                            page, form_el, pre_text,
+                            url_changed=(
+                                pre_url.rstrip("/")
+                                != page.url.rstrip("/")
+                            ),
+                            net_listener=net_listener,
+                        )
+                    )
+                except Exception:
+                    continue
+                s_late = dom_late.get("state", "unchanged")
+                if s_late in (
+                    "success", "likely_success",
+                ):
+                    dom_late["state"] = "success"
+                    if log:
+                        log.ok(
+                            "late POST пойман → success"
+                        )
+                    return dom_late
+                if s_late not in (
+                    "unchanged", "likely_failed",
+                ):
+                    dom = dom_late
+                    state = s_late
+                    break
 
         cur_match_for_cap = (
             dom.get("match", "") or ""

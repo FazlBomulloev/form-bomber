@@ -819,7 +819,7 @@ async def check_site_v2(
                     await extract_forms(page)
                 )
                 has_ct = await has_calltouch(page)
-                keep_ct = not form_json and has_ct
+                keep_ct = has_ct
                 await suppress_widgets(
                     page, keep_calltouch=keep_ct,
                 )
@@ -998,12 +998,19 @@ async def check_site_v2(
                 result["reason_code"] = "no_form"
 
             if (
-                result["status"] != "success"
-                and keep_ct
+                result["status"] not in (
+                    "success", "captcha",
+                )
+                and has_ct
             ):
                 _logger.step(
                     "calltouch",
-                    "форм нет, пробуем Calltouch API",
+                    (
+                        "форм нет, пробуем Calltouch API"
+                        if not form_json
+                        else "submit не подтвердился, "
+                        "пробуем Calltouch API"
+                    ),
                 )
                 ct_result = await try_calltouch(
                     page, phone, firstname,
