@@ -66,6 +66,59 @@ async def _get_calltouch_cookies(page):
             }""")
         except Exception:
             widget_hash = None
+
+    live_session_id = None
+    try:
+        live_session_id = await page.evaluate(r"""() => {
+            const seek = (obj, depth) => {
+                if (!obj || depth > 3) return null;
+                if (typeof obj !== 'object') return null;
+                if (obj.sessionId
+                    && String(obj.sessionId).length >= 8) {
+                    return String(obj.sessionId);
+                }
+                if (obj.id
+                    && String(obj.id).length >= 10) {
+                    return String(obj.id);
+                }
+                for (const k of Object.keys(obj)) {
+                    if (/^(_|node|owner|parent)/i.test(k))
+                        continue;
+                    try {
+                        const v = obj[k];
+                        if (v && typeof v === 'object') {
+                            const r = seek(v, depth + 1);
+                            if (r) return r;
+                        }
+                    } catch(e) {}
+                }
+                return null;
+            };
+            for (const k of Object.keys(window)) {
+                if (!/^ctw_/.test(k)) continue;
+                try {
+                    const r = seek(window[k], 0);
+                    if (r) return r;
+                } catch(e) {}
+            }
+            try {
+                if (window.CalltouchDataObject) {
+                    const cdo = window.CalltouchDataObject;
+                    const r = seek(cdo, 0);
+                    if (r) return r;
+                }
+            } catch(e) {}
+            return null;
+        }""")
+    except Exception:
+        live_session_id = None
+
+    if live_session_id and (
+        not session_id
+        or len(str(live_session_id)) > len(str(session_id))
+    ):
+        session_id = live_session_id
+
     return session_id, site_id, widget_hash
 
 async def try_calltouch(page, phone, name=""):
@@ -161,6 +214,7 @@ async def try_calltouch(page, phone, name=""):
             timeout=_TIMEOUT
         ) as s:
             load_data = None
+            last_raw = None
             for widget_types in (
                 ["callback", "wheel-fortune"],
                 ["callback"],
@@ -177,16 +231,22 @@ async def try_calltouch(page, phone, name=""):
                 }
                 if widget_hash:
                     payload["widgetHash"] = widget_hash
+                cand = None
                 try:
                     async with s.post(
                         _LOAD_URL,
                         json=payload,
                         headers=headers,
                     ) as r:
-                        cand = await r.json(
-                            content_type=None,
-                        )
-                except Exception:
+                        raw = await r.text()
+                        last_raw = f"HTTP {r.status} :: {raw[:300]}"
+                        try:
+                            import json as _json
+                            cand = _json.loads(raw)
+                        except Exception:
+                            cand = None
+                except Exception as e:
+                    last_raw = f"exc: {e}"
                     cand = None
                 if not cand:
                     continue
@@ -212,7 +272,8 @@ async def try_calltouch(page, phone, name=""):
                 if log:
                     log.warn(
                         "calltouch: нет showId/widgetId "
-                        f"(hash={widget_hash or 'none'})"
+                        f"(hash={widget_hash or 'none'}) "
+                        f"raw={last_raw or 'no-response'}"
                     )
                 return None
 
