@@ -1,4 +1,7 @@
 import aiohttp
+import asyncio
+import random
+import time
 from urllib.parse import urlparse
 
 from logger import get_logger
@@ -6,6 +9,11 @@ from logger import get_logger
 _TIMEOUT = aiohttp.ClientTimeout(total=20)
 _LOAD_URL = "https://mod.calltouch.ru/callback_load.php"
 _CALL_URL = "https://mod.calltouch.ru/callback_call.php"
+_EVENT_URL = "https://mod.calltouch.ru/widget_event.php"
+
+
+def _gen_show_id():
+    return random.randint(10_000_000_000, 99_999_999_999)
 
 
 def _to_int(v, default=0):
@@ -250,20 +258,35 @@ async def try_calltouch(page, phone, name=""):
                     cand = None
                 if not cand:
                     continue
-                items = cand
                 if isinstance(cand, dict) \
-                        and "widgets" in cand:
-                    items = cand["widgets"]
-                if isinstance(items, list):
-                    for it in items:
+                        and cand.get("sessionId") \
+                        and not session_id_int:
+                    session_id_int = int(cand["sessionId"])
+                if isinstance(cand, dict) \
+                        and isinstance(
+                            cand.get("sessionId"), int,
+                        ) \
+                        and cand["sessionId"] \
+                        != session_id_int:
+                    session_id_int = cand["sessionId"]
+                widget_settings = None
+                if isinstance(cand, dict):
+                    widget_settings = (
+                        cand.get("widgetSettings")
+                        or cand.get("widgets")
+                    )
+                if isinstance(widget_settings, list):
+                    for it in widget_settings:
                         if isinstance(it, dict) \
-                                and it.get("widgetId") \
-                                and it.get("showId"):
-                            load_data = it
+                                and it.get("widgetId"):
+                            load_data = dict(it)
+                            load_data.setdefault(
+                                "showId",
+                                cand.get("showId"),
+                            )
                             break
                 elif isinstance(cand, dict) \
-                        and cand.get("widgetId") \
-                        and cand.get("showId"):
+                        and cand.get("widgetId"):
                     load_data = cand
                 if load_data:
                     break
@@ -277,9 +300,44 @@ async def try_calltouch(page, phone, name=""):
                     )
                 return None
 
-            show_id = load_data.get("showId")
+            show_id = load_data.get("showId") or _gen_show_id()
             widget_id = load_data.get("widgetId")
             unit_id = load_data.get("unitId")
+            work_mode = load_data.get(
+                "workMode", "working_hours",
+            )
+            widget_type = load_data.get(
+                "widgetType", "callback",
+            )
+
+            event_payload = {
+                "showId": show_id,
+                "siteId": site_id_int,
+                "events": [{
+                    "object": "widget-button",
+                    "action": "show",
+                    "data": {
+                        "widgetId": widget_id,
+                        "widgetType": widget_type,
+                        "workMode": work_mode,
+                        "siteId": site_id_int,
+                        "sessionId": session_id_int,
+                        "actionType": "auto",
+                        "isMobile": False,
+                        "isMultiButton": False,
+                    },
+                }],
+            }
+            try:
+                async with s.post(
+                    _EVENT_URL,
+                    json=event_payload,
+                    headers=headers,
+                ):
+                    pass
+            except Exception:
+                pass
+            await asyncio.sleep(0.3)
 
             call_payload = {
                 "siteId": site_id_int,
