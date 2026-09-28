@@ -107,12 +107,30 @@ async def _get_sitekey(page):
                     const m = src.match(
                         /render=([^&]+)/
                     );
-                    if (m && m[1] !== 'explicit')
+                    if (m && m[1] !== 'explicit') {
+                        let action = 'submit';
+                        try {
+                            for (const s2 of scripts) {
+                                if (s2.src) continue;
+                                const t = s2.textContent
+                                    || '';
+                                const am = t.match(
+                                    /grecaptcha(?:\.enterprise)?\.execute\s*\(\s*['"]?[\w-]+['"]?\s*,\s*\{[^}]*action\s*:\s*['"]([\w_-]+)['"]/
+                                );
+                                if (am) {
+                                    action = am[1];
+                                    break;
+                                }
+                            }
+                        } catch(e) {}
                         return {
                             type: 'recaptcha',
                             key: m[1],
                             enterprise: ent,
+                            version: 'v3',
+                            action: action,
                         };
+                    }
                 }
             }
 
@@ -420,6 +438,9 @@ async def _detect_slider_captcha(page, rucaptcha_key):
 async def _solve_captcha(
     captcha_type, sitekey, page_url, rucaptcha_key,
     enterprise=False, max_tries=4,
+    version: str = "v2",
+    action: str = "",
+    min_score: float = 0.3,
 ):
     log = get_logger()
     if not rucaptcha_key or not sitekey:
@@ -448,6 +469,10 @@ async def _solve_captcha(
     }
     if enterprise and captcha_type == "recaptcha":
         params["enterprise"] = 1
+    if captcha_type == "recaptcha" and version == "v3":
+        params["version"] = "v3"
+        params["action"] = action or "submit"
+        params["min_score"] = min_score
 
     for solve_try in range(max_tries):
         if log:
@@ -571,26 +596,30 @@ async def _inject_captcha_token(
                 if (cbName && window[cbName])
                     try { window[cbName](token); }
                     catch(e) {}
-                if (isInvisible && window.grecaptcha
-                    && grecaptcha.execute) {
+                if (isInvisible && window.grecaptcha) {
                     try {
-                        const r = grecaptcha.execute();
-                        if (r && r.then) r.then(t => {
-                            const ta = document
-                                .querySelector(
-                                '#g-recaptcha-response,'
-                                + 'textarea[name='
-                                + '"g-recaptcha-response"]'
+                        const patch = (obj) => {
+                            if (!obj || !obj.execute
+                                || obj.__patched)
+                                return;
+                            const orig = obj.execute
+                                .bind(obj);
+                            obj.execute = function() {
+                                try { orig.apply(
+                                    obj, arguments
+                                ); } catch(e) {}
+                                return Promise.resolve(
+                                    token
+                                );
+                            };
+                            obj.__patched = true;
+                        };
+                        patch(window.grecaptcha);
+                        if (window.grecaptcha.enterprise)
+                            patch(
+                                window.grecaptcha
+                                    .enterprise
                             );
-                            if (ta) ta.value = t || token;
-                        });
-                    } catch(e) {}
-                }
-                if (isInvisible && window.grecaptcha
-                    && grecaptcha.enterprise
-                    && grecaptcha.enterprise.execute) {
-                    try {
-                        grecaptcha.enterprise.execute();
                     } catch(e) {}
                 }
                 try {
@@ -2108,10 +2137,14 @@ async def handle_post_submit_captcha(
             if info and info.get("key"):
                 ctype = info["type"]
                 skey = info["key"]
+                version = info.get("version", "v2")
+                action = info.get("action", "")
                 if log:
                     log.log_captcha(
                         "post_submit_found",
                         type=ctype,
+                        version=version,
+                        action=action,
                         sitekey=skey[:20],
                     )
                 token = await _solve_captcha(
@@ -2120,11 +2153,15 @@ async def handle_post_submit_captcha(
                     enterprise=info.get(
                         "enterprise", False
                     ),
+                    version=version,
+                    action=action,
                 )
                 if not token:
                     return "solve_failed"
                 ok = await _inject_captcha_token(
                     page, ctype, token,
+                    is_invisible=(version == "v3"),
+                    callback_name=None,
                 )
                 return "ok" if ok else "inject_failed"
 
@@ -2337,6 +2374,8 @@ async def handle_captcha(
         captcha_type = info["type"]
         sitekey = info["key"]
         is_enterprise = info.get("enterprise", False)
+        version = info.get("version", "v2")
+        action = info.get("action", "")
     elif captcha_type_hint:
         captcha_type = captcha_type_hint
         sitekey = None
@@ -2357,11 +2396,14 @@ async def handle_captcha(
         captcha_type, sitekey,
         page_url, rucaptcha_key,
         enterprise=is_enterprise,
+        version=version,
+        action=action,
     )
     if not token:
         return "solve_failed"
 
     ok = await _inject_captcha_token(
         page, captcha_type, token,
+        is_invisible=(version == "v3"),
     )
     return "ok" if ok else "inject_failed"
