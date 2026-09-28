@@ -1409,7 +1409,7 @@ async def _extract_smartcaptcha_sitekey(page):
             url = frame.url or ""
             if not _re.search(
                 r"smartcaptcha|captcha-cloud|"
-                r"captcha-api|captcha\.yandex",
+                r"captcha-api|captcha\.yandex|captcha\.ya\.net",
                 url, _re.IGNORECASE,
             ):
                 continue
@@ -1418,6 +1418,27 @@ async def _extract_smartcaptcha_sitekey(page):
             )
             if m:
                 return m.group(1)
+            m2 = _re.search(
+                r"/checkbox(?:\.[a-z]{2,3})?\."
+                r"([A-Za-z0-9_-]{15,})",
+                url,
+            )
+            if m2:
+                return m2.group(1)
+            m3 = _re.search(
+                r"/(?:invisible|challenge)"
+                r"(?:\.[a-z]{2,3})?\."
+                r"([A-Za-z0-9_-]{15,})",
+                url,
+            )
+            if m3:
+                return m3.group(1)
+            m4 = _re.search(
+                r"/([A-Za-z0-9_-]{25,})(?:[/?#]|$)",
+                url,
+            )
+            if m4 and not m4.group(1).startswith("6L"):
+                return m4.group(1)
     except Exception:
         pass
 
@@ -1894,9 +1915,10 @@ async def handle_post_submit_captcha(
     page, page_url, rucaptcha_key,
 ):
     log = get_logger()
+    no_sitekey_streak = 0
 
-    for wait_round in range(8):
-        await asyncio.sleep(2.5 if wait_round < 3 else 2)
+    for wait_round in range(4):
+        await asyncio.sleep(2.5 if wait_round < 2 else 2)
 
         try:
             _ = await page.evaluate("() => 1")
@@ -2056,10 +2078,28 @@ async def handle_post_submit_captcha(
                         return "inject_failed"
                     return "solve_failed"
                 else:
+                    no_sitekey_streak += 1
+                    frames_dump = ""
+                    try:
+                        frames_dump = ",".join(
+                            (fr.url or "")[:80]
+                            for fr in page.frames
+                            if fr != page.main_frame
+                        )[:400]
+                    except Exception:
+                        pass
                     if log:
                         log.log_captcha(
                             "post_submit_no_sitekey",
+                            streak=no_sitekey_streak,
+                            frames=frames_dump,
                         )
+                    if no_sitekey_streak >= 2:
+                        if log:
+                            log.log_captcha(
+                                "post_submit_no_sitekey_abort",
+                            )
+                        return None
 
             continue
 
