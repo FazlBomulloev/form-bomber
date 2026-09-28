@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 import shutil
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -48,10 +49,21 @@ from calltouch import try_calltouch
 _ai_sem = asyncio.Semaphore(AI_CONCURRENCY)
 _ws_clients: set = set()
 _browsers: list = []
-_browser_use_count: list = []
 _pw = None
 _browser_lock = asyncio.Lock()
 BROWSER_RECYCLE_AFTER = 15
+BROWSER_MAX_AGE_SEC = 600
+_CHROMIUM_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-features=TranslateUI,IsolateOrigins,site-per-process",
+    "--memory-pressure-off",
+    "--js-flags=--max-old-space-size=512",
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding",
+    "--disable-backgrounding-occluded-windows",
+]
 _active_queue_id: str | None = None
 _queue_cancel = asyncio.Event()
 _active_tasks: set = set()
@@ -322,15 +334,50 @@ def parse_proxy(raw: str) -> dict | None:
         return {"server": f"http://{parts[0]}:{parts[1]}"}
     return None
 
+def _make_slot(browser) -> dict:
+    slot = {
+        "browser": browser,
+        "uses": 0,
+        "started_at": time.monotonic(),
+        "alive": True,
+    }
+    try:
+        browser.on(
+            "disconnected",
+            lambda _b=browser: _mark_slot_dead_by_obj(_b),
+        )
+    except Exception:
+        pass
+    return slot
+
+def _mark_slot_dead_by_obj(browser):
+    for s in _browsers:
+        if s.get("browser") is browser:
+            s["alive"] = False
+            return
+
+def _mark_browser_dead(idx: int):
+    if 0 <= idx < len(_browsers):
+        _browsers[idx]["alive"] = False
+
+def _slot_needs_recycle(slot: dict) -> bool:
+    if not slot.get("alive", False):
+        return True
+    if slot.get("uses", 0) >= BROWSER_RECYCLE_AFTER:
+        return True
+    age = time.monotonic() - slot.get("started_at", 0)
+    if age >= BROWSER_MAX_AGE_SEC:
+        return True
+    return False
+
 async def _reset_browsers():
-    global _browsers, _browser_use_count, _pw
-    for br in list(_browsers):
+    global _browsers, _pw
+    for s in list(_browsers):
         try:
-            await br.close()
+            await s["browser"].close()
         except Exception:
             pass
     _browsers = []
-    _browser_use_count = []
     try:
         if _pw:
             await _pw.stop()
@@ -339,72 +386,49 @@ async def _reset_browsers():
     _pw = None
 
 async def _ensure_browsers(count: int = 2):
-    global _browsers, _browser_use_count, _pw
+    global _browsers, _pw
     async with _browser_lock:
         alive = []
-        alive_counts = []
-        for i, br in enumerate(_browsers):
-            try:
-                br.contexts
-                cnt = (
-                    _browser_use_count[i]
-                    if i < len(_browser_use_count) else 0
-                )
-                if cnt >= BROWSER_RECYCLE_AFTER:
-                    try:
-                        await br.close()
-                    except Exception:
-                        pass
-                    continue
-                alive.append(br)
-                alive_counts.append(cnt)
-            except Exception:
-                pass
+        for s in _browsers:
+            if _slot_needs_recycle(s):
+                try:
+                    await s["browser"].close()
+                except Exception:
+                    pass
+                continue
+            alive.append(s)
         _browsers = alive
-        _browser_use_count = alive_counts
         if len(_browsers) >= count:
-            return _browsers[:count]
+            return [s["browser"] for s in _browsers[:count]]
         if _pw is None:
             _pw = await async_playwright().start()
         while len(_browsers) < count:
             br = await _pw.chromium.launch(
                 headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ],
+                args=_CHROMIUM_ARGS,
             )
-            _browsers.append(br)
-            _browser_use_count.append(0)
-        return _browsers[:count]
+            _browsers.append(_make_slot(br))
+        return [s["browser"] for s in _browsers[:count]]
 
 async def _get_browser(idx: int = 0):
     browsers = await _ensure_browsers(max(1, idx + 1))
     real_idx = idx % len(browsers)
-    if real_idx < len(_browser_use_count):
-        _browser_use_count[real_idx] += 1
+    if real_idx < len(_browsers):
+        _browsers[real_idx]["uses"] += 1
     return browsers[real_idx]
 
 async def _recycle_browser_if_needed(idx: int = 0):
-    global _browsers, _browser_use_count
+    global _browsers
     async with _browser_lock:
         if idx < 0 or idx >= len(_browsers):
             return
-        cnt = (
-            _browser_use_count[idx]
-            if idx < len(_browser_use_count) else 0
-        )
-        if cnt < BROWSER_RECYCLE_AFTER:
+        if not _slot_needs_recycle(_browsers[idx]):
             return
-        br = _browsers[idx]
+        s = _browsers.pop(idx)
         try:
-            await br.close()
+            await s["browser"].close()
         except Exception:
             pass
-        _browsers.pop(idx)
-        if idx < len(_browser_use_count):
-            _browser_use_count.pop(idx)
 
 async def _ws_broadcast(data: dict):
     msg = json.dumps(data, ensure_ascii=False)
@@ -665,7 +689,8 @@ async def check_site_v2(
                 page = await ctx.new_page()
                 break
             except Exception:
-                await _reset_browsers()
+                _mark_browser_dead(browser_idx)
+                await _recycle_browser_if_needed(browser_idx)
                 if _br_try == 1:
                     raise
                 _logger.warn("браузер упал, перезапуск")
@@ -675,11 +700,16 @@ async def check_site_v2(
         try:
             _logger.step("navigate", url)
             _goto_try = 0
+            _wait_strategies = ["domcontentloaded", "load", "commit"]
+            _proxy_dropped = False
             while True:
+                strategy = _wait_strategies[
+                    min(_goto_try, len(_wait_strategies) - 1)
+                ]
                 try:
                     await page.goto(
-                        url, wait_until="domcontentloaded",
-                        timeout=30000,
+                        url, wait_until=strategy,
+                        timeout=45000,
                     )
                     break
                 except Exception as _ge:
@@ -687,20 +717,31 @@ async def check_site_v2(
                     _msg = str(_ge)
                     _crashed = (
                         "Page crashed" in _msg
+                        or "Target crashed" in _msg
                         or "TargetClosed" in _msg
                         or "Target page, context or browser"
                         in _msg
+                        or "WriteUnixTransport closed" in _msg
+                        or "Connection closed" in _msg
                     )
-                    if _crashed and _goto_try < 2:
+                    _tunnel = (
+                        "ERR_TUNNEL_CONNECTION_FAILED" in _msg
+                        or "ERR_PROXY_CONNECTION_FAILED" in _msg
+                    )
+                    if _crashed and _goto_try <= 2:
                         _logger.warn(
                             "page crashed на goto, "
-                            "пересоздаём контекст",
+                            "пересоздаём браузер",
                         )
+                        _mark_browser_dead(browser_idx)
                         try:
                             await ctx.close()
                         except Exception:
                             pass
                         _active_contexts.discard(ctx)
+                        await _recycle_browser_if_needed(
+                            browser_idx,
+                        )
                         browser = await _get_browser(browser_idx)
                         ctx = await browser.new_context(
                             **ctx_kwargs,
@@ -709,6 +750,40 @@ async def check_site_v2(
                         await install_resource_blocker(ctx)
                         _active_contexts.add(ctx)
                         page = await ctx.new_page()
+                        await asyncio.sleep(1)
+                        continue
+                    if (
+                        _tunnel
+                        and not _proxy_dropped
+                        and proxy
+                        and _goto_try <= 2
+                    ):
+                        _logger.warn(
+                            "прокси-туннель мёртв, "
+                            "retry без прокси",
+                        )
+                        _proxy_dropped = True
+                        try:
+                            await ctx.close()
+                        except Exception:
+                            pass
+                        _active_contexts.discard(ctx)
+                        _fallback_kwargs = dict(ctx_kwargs)
+                        _fallback_kwargs.pop("proxy", None)
+                        ctx = await browser.new_context(
+                            **_fallback_kwargs,
+                        )
+                        await apply_stealth(ctx)
+                        await install_resource_blocker(ctx)
+                        _active_contexts.add(ctx)
+                        page = await ctx.new_page()
+                        await asyncio.sleep(1)
+                        continue
+                    if _goto_try < len(_wait_strategies):
+                        _logger.warn(
+                            f"goto {strategy} упал, "
+                            f"пробуем {_wait_strategies[_goto_try]}",
+                        )
                         await asyncio.sleep(1)
                         continue
                     raise
@@ -1076,6 +1151,17 @@ async def check_site_v2(
         _site_logger_var.reset(_log_token)
         raise
     except Exception as e:
+        _emsg = str(e)
+        if (
+            "Target crashed" in _emsg
+            or "Page crashed" in _emsg
+            or "TargetClosed" in _emsg
+            or "Target page, context or browser" in _emsg
+            or "WriteUnixTransport closed" in _emsg
+            or "Connection closed while reading" in _emsg
+            or "Browser closed" in _emsg
+        ):
+            _mark_browser_dead(browser_idx)
         result["message"] = (
             f"Критическая ошибка: "
             f"{type(e).__name__}: {str(e)[:200]}"
