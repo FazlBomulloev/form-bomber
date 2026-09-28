@@ -773,9 +773,16 @@ async def _accept_form(ctx, form_json: dict, log) -> bool:
 
 _CONTACT_PATHS = [
     "/kontakty", "/contacts", "/contact", "/contact-us",
-    "/zapis", "/zayavka", "/online-zapis",
-    "/onlajn-zapis", "/about/contacts",
-    "/obratnaya-svyaz", "/feedback",
+    "/zapis", "/zapisatsya", "/zayavka", "/online-zapis",
+    "/onlajn-zapis", "/onlain-zapis",
+    "/about/contacts", "/obratnaya-svyaz",
+    "/obratnaya-sviaz", "/feedback",
+    "/callback", "/svyaz", "/svyazatsya",
+    "/kontakty.html", "/contacts.html",
+    "/kontakty.htm", "/contacts.htm",
+    "/kontakty/", "/contacts/", "/zapis/",
+    "/about-us/contacts", "/contakt", "/kontact",
+    "/napishite-nam", "/napisat", "/write-us",
 ]
 
 _CONTACT_LINK_RE = re.compile(
@@ -868,8 +875,8 @@ async def _find_contact_page(page, log):
             f"({len(candidates)} канд.)",
         )
 
-    deadline = time.monotonic() + 15.0
-    max_nav = 4
+    deadline = time.monotonic() + 25.0
+    max_nav = 6
     nav = 0
     for url in candidates:
         if nav >= max_nav or time.monotonic() >= deadline:

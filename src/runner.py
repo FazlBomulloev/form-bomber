@@ -983,6 +983,42 @@ async def check_site_v2(
                 form_json, form_ctx = (
                     await extract_forms(page)
                 )
+                if not form_json or not form_json.get(
+                    "fields"
+                ):
+                    _logger.step(
+                        "extract_retry",
+                        "форм нет, ждём SPA рендер",
+                    )
+                    try:
+                        await page.wait_for_load_state(
+                            "networkidle", timeout=8000,
+                        )
+                    except Exception:
+                        await asyncio.sleep(3)
+                    try:
+                        await page.evaluate(
+                            "() => window.scrollTo(0, "
+                            "document.body.scrollHeight/2)"
+                        )
+                        await asyncio.sleep(1.2)
+                        await page.evaluate(
+                            "() => window.scrollTo(0, 0)"
+                        )
+                        await asyncio.sleep(0.6)
+                    except Exception:
+                        pass
+                    form_json, form_ctx = (
+                        await extract_forms(page)
+                    )
+                    if (
+                        form_json
+                        and form_json.get("fields")
+                    ):
+                        _logger.ok(
+                            "форма найдена после "
+                            "SPA-задержки"
+                        )
                 has_ct = await has_calltouch(page)
                 keep_ct = has_ct
                 await suppress_widgets(

@@ -1488,6 +1488,81 @@ async def execute_action_plan(
                 break
             await asyncio.sleep(0.5)
 
+        if not has_inputs:
+            try:
+                opened = await page.evaluate(
+                    r"""fe => {
+                    let n = fe;
+                    const wrapSels = [
+                        '.t-popup', '.t-popup__container',
+                        '.modal', '.popup',
+                        '[role="dialog"]',
+                        '[aria-modal="true"]',
+                        '[class*="popup" i]',
+                        '[class*="modal" i]',
+                    ];
+                    for (let i = 0; i < 12 && n; i++) {
+                        for (const s of wrapSels) {
+                            if (!n.matches
+                                || !n.matches(s)) continue;
+                            try {
+                                n.classList.add(
+                                    't-popup_show',
+                                    'active',
+                                    'is-open',
+                                    'show',
+                                    'opened',
+                                );
+                                n.style.setProperty(
+                                    'display','block',
+                                    'important');
+                                n.style.setProperty(
+                                    'visibility','visible',
+                                    'important');
+                                n.style.setProperty(
+                                    'opacity','1',
+                                    'important');
+                                n.removeAttribute('hidden');
+                                n.removeAttribute(
+                                    'aria-hidden');
+                            } catch(e) {}
+                            return true;
+                        }
+                        n = n.parentElement;
+                    }
+                    return false;
+                }""", form_el)
+                if opened and log:
+                    log.warn(
+                        "форма скрыта, "
+                        "принудительно раскрыл модалку"
+                    )
+                if opened:
+                    for _ in range(6):
+                        has_inputs = await page.evaluate(
+                            r"""fe => {
+                            const els = fe.querySelectorAll(
+                                'input:not([type="hidden"])'
+                                + ':not([type="submit"]),'
+                                + 'textarea');
+                            for (const el of els) {
+                                try {
+                                    const st =
+                                        getComputedStyle(el);
+                                    if (st.display !== 'none'
+                                        && st.visibility
+                                            !== 'hidden')
+                                        return true;
+                                } catch(e) {}
+                            }
+                            return false;
+                        }""", form_el)
+                        if has_inputs:
+                            break
+                        await asyncio.sleep(0.4)
+            except Exception:
+                pass
+
     await dismiss_popups(page, form_el)
 
     for act in sorted(
