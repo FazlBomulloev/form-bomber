@@ -612,31 +612,32 @@ async def _mutation_observer_retry(page):
         pass
 
     appeared_flag = False
-    for _ in range(15):
-        await asyncio.sleep(0.2)
-        try:
-            appeared = await page.evaluate(
-                "() => window.__fbFormAppeared",
-            )
-            if appeared:
-                appeared_flag = True
-                if log:
-                    log.ok(
-                        "MutationObserver: "
-                        "phone field появился",
-                    )
-                break
-        except Exception:
-            break
-
     try:
-        await page.evaluate(r"""() => {
-            try { window.__fbFormMO?.disconnect(); }
-            catch(e) {}
-            window.__fbFormMO = null;
-        }""")
-    except Exception:
-        pass
+        for _ in range(15):
+            await asyncio.sleep(0.2)
+            try:
+                appeared = await page.evaluate(
+                    "() => window.__fbFormAppeared",
+                )
+                if appeared:
+                    appeared_flag = True
+                    if log:
+                        log.ok(
+                            "MutationObserver: "
+                            "phone field появился",
+                        )
+                    break
+            except Exception:
+                break
+    finally:
+        try:
+            await page.evaluate(r"""() => {
+                try { window.__fbFormMO?.disconnect(); }
+                catch(e) {}
+                window.__fbFormMO = null;
+            }""")
+        except Exception:
+            pass
 
     if appeared_flag:
         await asyncio.sleep(0.8)
@@ -674,7 +675,11 @@ def _score_form_type(
 
     has_phone = "phone" in roles
     has_email = "email" in roles
-    has_password = any(t == "password" for t in types)
+    has_password = any(
+        (f.get("type") or "").lower() == "password"
+        and f.get("visible")
+        for f in fields
+    )
     has_search_input = any(t == "search" for t in types)
     has_textarea_named = any(
         f.get("tag") == "textarea" and f.get("name")
@@ -828,6 +833,46 @@ async def _collect_contact_links(page):
     except Exception:
         return []
 
+_SITEMAP_CONTACT_RE = re.compile(
+    r"contact|kontakt|zapis|obratn|feedback|svyaz|"
+    r"napisat|napishite|callback",
+    re.I,
+)
+
+async def _discover_from_sitemap(page, origin):
+    out = []
+    try:
+        result = await page.evaluate(
+            r"""async (url) => {
+            try {
+                const r = await fetch(url, {
+                    credentials: 'omit',
+                });
+                if (!r.ok) return '';
+                const t = await r.text();
+                return t.length > 300000
+                    ? t.slice(0, 300000)
+                    : t;
+            } catch(e) { return ''; }
+        }""",
+            f"{origin}/sitemap.xml",
+        )
+    except Exception:
+        result = ""
+    if not result:
+        return out
+    for match in re.findall(
+        r"<loc>([^<]+)</loc>", result, re.I,
+    ):
+        url = match.strip()
+        if not url:
+            continue
+        if _SITEMAP_CONTACT_RE.search(url):
+            out.append(url)
+            if len(out) >= 8:
+                break
+    return out
+
 async def _find_contact_page(page, log):
     try:
         cur = page.url
@@ -864,6 +909,14 @@ async def _find_contact_page(page, log):
         _add(link)
     for path in _CONTACT_PATHS:
         _add(urljoin(origin + "/", path.lstrip("/")))
+    try:
+        sm_urls = await _discover_from_sitemap(
+            page, origin,
+        )
+        for u in sm_urls:
+            _add(u)
+    except Exception:
+        pass
 
     if not candidates:
         return None, None
@@ -1023,7 +1076,7 @@ async def extract_forms(
 
             appeared = (
                 await _wait_form_after_trigger(
-                    search_page, timeout=12000,
+                    search_page, timeout=6000,
                 )
             )
             accepted = False

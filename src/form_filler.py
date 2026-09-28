@@ -1501,6 +1501,57 @@ async def execute_action_plan(
                         '[class*="popup" i]',
                         '[class*="modal" i]',
                     ];
+                    const triggerNative = (el) => {
+                        try {
+                            if (window.t_popup__showPopup
+                                && el.id) {
+                                window.t_popup__showPopup(
+                                    el.id
+                                );
+                            }
+                        } catch(e) {}
+                        try {
+                            if (window.BX
+                                && window.BX.SidePanel
+                                && window.BX.SidePanel
+                                    .Instance) {
+                                const trigId =
+                                    el.getAttribute(
+                                        'data-b24-form-id'
+                                    );
+                                if (trigId) {
+                                    window.BX.SidePanel
+                                        .Instance.open(
+                                            trigId
+                                        );
+                                }
+                            }
+                        } catch(e) {}
+                        try {
+                            if (window.jQuery) {
+                                jQuery(el).trigger(
+                                    'shown.bs.modal'
+                                );
+                                jQuery(el).trigger(
+                                    'shown'
+                                );
+                            }
+                        } catch(e) {}
+                        try {
+                            el.dispatchEvent(new Event(
+                                'shown',
+                                {bubbles: true}
+                            ));
+                            el.dispatchEvent(new Event(
+                                'open',
+                                {bubbles: true}
+                            ));
+                            el.dispatchEvent(new Event(
+                                'transitionend',
+                                {bubbles: true}
+                            ));
+                        } catch(e) {}
+                    };
                     for (let i = 0; i < 12 && n; i++) {
                         for (const s of wrapSels) {
                             if (!n.matches
@@ -1526,6 +1577,7 @@ async def execute_action_plan(
                                 n.removeAttribute(
                                     'aria-hidden');
                             } catch(e) {}
+                            triggerNative(n);
                             return true;
                         }
                         n = n.parentElement;
@@ -2498,6 +2550,178 @@ async def _escalate_submit(page, form_el, pred):
         )
     return resp
 
+async def _inject_bitrix_sessid(page, form_el):
+    if form_el is None:
+        return
+    try:
+        await page.evaluate(
+            r"""fe => {
+            try {
+                if (!window.BX
+                    || typeof window.BX.bitrix_sessid
+                        !== 'function')
+                    return false;
+                const sid = window.BX.bitrix_sessid();
+                if (!sid) return false;
+                let inp = fe.querySelector(
+                    'input[name="sessid"]'
+                );
+                if (!inp) {
+                    inp = document.createElement('input');
+                    inp.type = 'hidden';
+                    inp.name = 'sessid';
+                    fe.appendChild(inp);
+                }
+                inp.value = sid;
+                return true;
+            } catch(e) { return false; }
+        }""", form_el,
+        )
+    except Exception:
+        pass
+
+async def _maybe_wpcf7_xhr_fallback(
+    page, form_el, phone,
+    firstname, lastname, patronymic,
+    email, comment, dom_result, log,
+):
+    if not dom_result:
+        return dom_result
+    state = dom_result.get("state", "")
+    if state not in ("unchanged", "uncertain", ""):
+        return dom_result
+    if form_el is None:
+        return dom_result
+    try:
+        wpcf7_info = await page.evaluate(
+            r"""fe => {
+            const f = fe.closest
+                ? fe.closest('.wpcf7 form,'
+                    + 'form.wpcf7-form')
+                : null;
+            const target = f || fe;
+            const isWpcf7 = target.classList
+                && Array.from(target.classList).some(
+                    c => c.startsWith('wpcf7')
+                );
+            if (!isWpcf7) return null;
+            const action = target.action || location.href;
+            const data = {};
+            for (const el of target.elements || []) {
+                if (!el.name) continue;
+                if (el.type === 'submit') continue;
+                if (el.type === 'checkbox'
+                    || el.type === 'radio') {
+                    if (!el.checked) continue;
+                    data[el.name] = el.value || 'on';
+                    continue;
+                }
+                if (el.tagName === 'SELECT') {
+                    data[el.name] = el.value || '';
+                    continue;
+                }
+                data[el.name] = el.value || '';
+            }
+            return { action, data };
+        }""", form_el,
+        )
+    except Exception:
+        wpcf7_info = None
+    if not wpcf7_info:
+        return dom_result
+
+    action_url = wpcf7_info.get("action") or ""
+    data = wpcf7_info.get("data") or {}
+    if not data.get("_wpcf7"):
+        return dom_result
+
+    fill_map = {
+        "your-phone": phone, "phone": phone,
+        "tel": phone, "your-tel": phone,
+        "your-name": (firstname or "Клиент"),
+        "name": (firstname or "Клиент"),
+        "fio": " ".join(
+            p for p in (lastname, firstname, patronymic)
+            if p
+        ) or (firstname or "Клиент"),
+        "your-email": email or "test@example.com",
+        "email": email or "test@example.com",
+        "your-message": comment or "Заявка",
+        "message": comment or "Заявка",
+        "your-comment": comment or "Заявка",
+    }
+    for k in list(data.keys()):
+        if data[k]:
+            continue
+        base = k.lower().replace("[]", "").strip()
+        if base in fill_map:
+            data[k] = fill_map[base]
+
+    if log:
+        log.step(
+            "wpcf7_xhr",
+            f"фолбэк на XHR: {action_url[:60]}",
+        )
+    try:
+        result = await page.evaluate(
+            r"""async ({url, data}) => {
+            const fd = new FormData();
+            for (const [k, v] of Object.entries(data)) {
+                fd.append(k, v);
+            }
+            try {
+                const r = await fetch(url, {
+                    method: 'POST',
+                    body: fd,
+                    credentials: 'include',
+                    headers: {
+                        'X-Requested-With':
+                            'XMLHttpRequest',
+                    },
+                });
+                const txt = await r.text();
+                return {
+                    status: r.status,
+                    body: txt.slice(0, 2000),
+                };
+            } catch(e) {
+                return {
+                    status: 0,
+                    body: 'error: ' + e.message,
+                };
+            }
+        }""",
+            {"url": action_url, "data": data},
+        )
+    except Exception as e:
+        if log:
+            log.warn(f"wpcf7_xhr упал: {str(e)[:80]}")
+        return dom_result
+
+    body_low = (result.get("body") or "").lower()
+    if (
+        result.get("status") == 200
+        and (
+            "mail_sent" in body_low
+            or "wpcf7mailsent" in body_low
+            or '"status":"mail_sent"' in body_low
+            or '"status":"mail_sent"' in body_low
+        )
+    ):
+        if log:
+            log.ok("wpcf7_xhr: mail_sent")
+        return {
+            "state": "success",
+            "match": "wpcf7 XHR: mail_sent",
+        }
+    if log:
+        log.step(
+            "wpcf7_xhr_result",
+            f"status={result.get('status')} "
+            f"body={body_low[:80]}",
+        )
+    return dom_result
+
 async def submit_with_retry(
     page, submit_sel, form_el,
     phone, firstname, lastname,
@@ -2528,6 +2752,11 @@ async def submit_with_retry(
     prev_err_match = None
     origin_host = _norm_host(pre_url)
     submit_pred = _make_submit_predicate(origin_host)
+
+    try:
+        await _inject_bitrix_sessid(page, form_el)
+    except Exception:
+        pass
 
     for attempt in range(1, max_submits + 1):
         if log:
@@ -2935,10 +3164,18 @@ async def submit_with_retry(
                         "нечего исправлять, "
                         "повтор бесполезен"
                     )
-                return dom
+                return await _maybe_wpcf7_xhr_fallback(
+                    page, form_el, phone,
+                    firstname, lastname, patronymic,
+                    email, comment, dom, log,
+                )
             await asyncio.sleep(0.5)
             continue
 
         return dom
 
-    return dom
+    return await _maybe_wpcf7_xhr_fallback(
+        page, form_el, phone,
+        firstname, lastname, patronymic,
+        email, comment, dom, log,
+    )

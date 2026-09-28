@@ -111,7 +111,9 @@ _FAIL_URL_RE = _re.compile(
 def _looks_like_success(body: str) -> bool:
     if not body:
         return False
-    if _STRICT_ERR_RE.search(body) and not _STRONG_OK_RE.search(body):
+    if _STRONG_OK_RE.search(body):
+        return True
+    if _STRICT_ERR_RE.search(body):
         return False
     return bool(_OK_RE.search(body))
 

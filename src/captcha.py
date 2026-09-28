@@ -1,11 +1,54 @@
 import asyncio
+import time
 
 import aiohttp
 
 from config import RUCAPTCHA_IN, RUCAPTCHA_RES
 from logger import get_logger
 
-_TIMEOUT = aiohttp.ClientTimeout(total=30)
+_TIMEOUT = aiohttp.ClientTimeout(
+    total=None, connect=10, sock_read=25,
+)
+
+_RUCAPTCHA_DISABLED_UNTIL = 0.0
+_RUCAPTCHA_DISABLED_REASON = ""
+
+_TERMINAL_ERRORS = {
+    "ERROR_ZERO_BALANCE",
+    "ERROR_KEY_DOES_NOT_EXIST",
+    "ERROR_WRONG_USER_KEY",
+    "ERROR_KEY_DOES_NOT_EXISTS",
+    "ERROR_IP_NOT_ALLOWED",
+    "ERROR_IP_BLOCKED",
+    "IP_BANNED",
+}
+
+_TRANSIENT_ERRORS = {
+    "ERROR_NO_SLOT_AVAILABLE",
+    "MAX_USER_TURN",
+    "ERROR_BAD_TOKEN_OR_PAGEURL",
+    "ERROR_NO_ANSWER_YET",
+}
+
+def _rucaptcha_available():
+    global _RUCAPTCHA_DISABLED_UNTIL
+    if _RUCAPTCHA_DISABLED_UNTIL == 0:
+        return True
+    if time.monotonic() >= _RUCAPTCHA_DISABLED_UNTIL:
+        _RUCAPTCHA_DISABLED_UNTIL = 0.0
+        return True
+    return False
+
+def _disable_rucaptcha(reason: str, cooldown: float):
+    global _RUCAPTCHA_DISABLED_UNTIL, _RUCAPTCHA_DISABLED_REASON
+    _RUCAPTCHA_DISABLED_UNTIL = time.monotonic() + cooldown
+    _RUCAPTCHA_DISABLED_REASON = reason
+    log = get_logger()
+    if log:
+        log.warn(
+            f"RuCaptcha отключён на {int(cooldown)}с: "
+            f"{reason}"
+        )
 
 async def _get_sitekey(page):
     try:
@@ -445,6 +488,13 @@ async def _solve_captcha(
     log = get_logger()
     if not rucaptcha_key or not sitekey:
         return None
+    if not _rucaptcha_available():
+        if log:
+            log.warn(
+                f"RuCaptcha в cooldown: "
+                f"{_RUCAPTCHA_DISABLED_REASON}"
+            )
+        return None
 
     method_map = {
         "recaptcha": "userrecaptcha",
@@ -460,19 +510,47 @@ async def _solve_captcha(
         "googlekey" if captcha_type == "recaptcha"
         else "sitekey"
     )
-    params = {
-        "key": rucaptcha_key,
-        "method": method,
-        key_param: sitekey,
-        "pageurl": page_url,
-        "json": 1,
-    }
-    if enterprise and captcha_type == "recaptcha":
-        params["enterprise"] = 1
+
     if captcha_type == "recaptcha" and version == "v3":
-        params["version"] = "v3"
-        params["action"] = action or "submit"
-        params["min_score"] = min_score
+        score_ladder = [0.7, 0.5, 0.3]
+    else:
+        score_ladder = [min_score]
+
+    for score in score_ladder:
+        params = {
+            "key": rucaptcha_key,
+            "method": method,
+            key_param: sitekey,
+            "pageurl": page_url,
+            "json": 1,
+        }
+        if enterprise and captcha_type == "recaptcha":
+            params["enterprise"] = 1
+        if captcha_type == "recaptcha" and version == "v3":
+            params["version"] = "v3"
+            params["action"] = action or "submit"
+            params["min_score"] = score
+            if log:
+                log.log_captcha(
+                    "v3_try", min_score=score,
+                    action=action or "submit",
+                )
+        token = await _solve_captcha_single(
+            params, rucaptcha_key, max_tries, log,
+        )
+        if token:
+            return token
+    return None
+
+async def _solve_captcha_single(
+    params, rucaptcha_key, max_tries, log,
+):
+    captcha_type = "recaptcha" if params.get(
+        "method"
+    ) == "userrecaptcha" else params.get("method", "")
+    sitekey = params.get(
+        "googlekey"
+    ) or params.get("sitekey", "")
 
     for solve_try in range(max_tries):
         if log:
@@ -493,13 +571,17 @@ async def _solve_captcha(
                         content_type=None
                     )
                 if resp.get("status") != 1:
+                    err = resp.get("request", "?")
                     if log:
                         log.log_captcha(
-                            "error_submit",
-                            error=resp.get(
-                                "request", "?"
-                            ),
+                            "error_submit", error=err,
                         )
+                    if err in _TERMINAL_ERRORS:
+                        _disable_rucaptcha(err, 900)
+                        return None
+                    if err in _TRANSIENT_ERRORS:
+                        await asyncio.sleep(15)
+                        continue
                     return None
                 task_id = resp["request"]
                 if log:
@@ -508,8 +590,12 @@ async def _solve_captcha(
                         task_id=task_id,
                     )
 
-                for attempt in range(30):
-                    await asyncio.sleep(5)
+                got_token = None
+                for attempt in range(35):
+                    if attempt < 3:
+                        await asyncio.sleep(3)
+                    else:
+                        await asyncio.sleep(5)
                     async with s.get(
                         RUCAPTCHA_RES,
                         params={
@@ -523,37 +609,41 @@ async def _solve_captcha(
                             content_type=None
                         )
                     if res.get("status") == 1:
-                        token = res["request"]
+                        got_token = res["request"]
                         if log:
                             log.log_captcha(
                                 "solved",
                                 attempt=attempt,
-                                token=token[:30],
+                                token=got_token[:30],
                             )
-                        return token
+                        return got_token
                     err_code = res.get("request", "")
-                    if err_code not in (
+                    if err_code in (
                         "CAPCHA_NOT_READY",
                         "CAPTCHA_NOT_READY",
                     ):
+                        continue
+                    if log:
+                        log.log_captcha(
+                            "error_poll",
+                            error=err_code or "?",
+                        )
+                    if err_code in _TERMINAL_ERRORS:
+                        _disable_rucaptcha(err_code, 900)
+                        return None
+                    if (
+                        err_code
+                        == "ERROR_CAPTCHA_UNSOLVABLE"
+                        and solve_try + 1 < max_tries
+                    ):
                         if log:
                             log.log_captcha(
-                                "error_poll",
-                                error=err_code or "?",
+                                "retry_unsolvable",
                             )
-                        if (
-                            err_code
-                            == "ERROR_CAPTCHA_UNSOLVABLE"
-                            and solve_try + 1 < max_tries
-                        ):
-                            if log:
-                                log.log_captcha(
-                                    "retry_unsolvable",
-                                )
-                            await asyncio.sleep(3)
-                            break
-                        return None
-                else:
+                        await asyncio.sleep(3)
+                        break
+                    return None
+                if got_token is None and attempt >= 34:
                     return None
         except Exception as e:
             if log:
@@ -1203,15 +1293,55 @@ async def _try_click_smartcaptcha(page):
         "captcha-api", "captcha.yandex",
         "captcha.ya.net", "tildaapi",
     )
-    _CB_SEL = (
-        'input[type="checkbox"],'
-        '.CheckboxCaptcha-Anchor,'
-        '[class*="checkbox" i],'
-        'button[class*="check" i],'
-        '[role="checkbox"],'
-        '[data-testid="checkbox"],'
-        '.CheckboxCaptcha-Button'
-    )
+    _CB_SEL_PRIORITY = [
+        '.CheckboxCaptcha-Anchor',
+        '.CheckboxCaptcha-Button',
+        '[class*="CheckboxCaptcha" i][role="button"]',
+        '[role="checkbox"]',
+        'button[class*="check" i]',
+        '[data-testid="checkbox"]',
+        'input[type="checkbox"]',
+        '[class*="checkbox" i]',
+    ]
+
+    async def _click_human(fr, el):
+        try:
+            box = await el.bounding_box()
+            if box:
+                cx = box["x"] + box["width"] / 2
+                cy = box["y"] + box["height"] / 2
+                try:
+                    await fr.evaluate(
+                        r"""({x, y, el}) => {
+                        const opts = {
+                            bubbles: true,
+                            cancelable: true,
+                            clientX: x,
+                            clientY: y,
+                            button: 0,
+                        };
+                        el.dispatchEvent(
+                            new MouseEvent('mousedown', opts)
+                        );
+                        el.dispatchEvent(
+                            new MouseEvent('mouseup', opts)
+                        );
+                        el.dispatchEvent(
+                            new MouseEvent('click', opts)
+                        );
+                    }""",
+                        {"x": cx, "y": cy, "el": el},
+                    )
+                    return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            await el.click(timeout=2000)
+            return True
+        except Exception:
+            return False
 
     for attempt in range(3):
         if attempt > 0:
@@ -1247,19 +1377,26 @@ async def _try_click_smartcaptcha(page):
                 if not is_sc:
                     continue
                 sc_frame_found = True
-                cb = await frame.query_selector(
-                    _CB_SEL
-                )
+                cb = None
+                for sel in _CB_SEL_PRIORITY:
+                    try:
+                        cb = await frame.query_selector(
+                            sel
+                        )
+                        if cb:
+                            break
+                    except Exception:
+                        continue
                 if not cb:
+                    combo = ",".join(_CB_SEL_PRIORITY)
                     try:
                         cb = await frame.wait_for_selector(
-                            _CB_SEL, timeout=3000,
+                            combo, timeout=3000,
                             state="visible",
                         )
                     except Exception:
                         pass
-                if cb:
-                    await cb.click()
+                if cb and await _click_human(frame, cb):
                     if log:
                         log.log_captcha(
                             "smartcaptcha_checkbox_click",
