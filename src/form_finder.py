@@ -1067,6 +1067,25 @@ async def extract_forms(
                     ):
                         continue
                     break
+                if_form, if_frame = (
+                    await _find_in_iframes(search_page)
+                )
+                if if_form and await _accept_form(
+                    if_frame, if_form, log,
+                ):
+                    if log:
+                        log.ok(
+                            f"форма в iframe после "
+                            f"«{text[:25]}»: "
+                            f"{len(if_form.get('fields', []))}"
+                            f" полей"
+                        )
+                    return if_form, FormContext(
+                        html="",
+                        source="trigger_iframe",
+                        trigger_text=text[:50],
+                        frame=if_frame,
+                    )
 
             if new_tab:
                 try:
@@ -1265,9 +1284,14 @@ def build_smart_plan(form_json: dict) -> dict:
 
     notes = "Эвристика: plan ok"
     if not has_phone:
-        notes = (
-            "Эвристика: телефон не найден в форме"
-        )
+        return {
+            "form_found": False,
+            "actions": [],
+            "notes": (
+                "Эвристика: телефон не найден в форме "
+                "— не лид-форма (поиск/бронирование)"
+            ),
+        }
 
     return {
         "form_found": True,

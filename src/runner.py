@@ -702,12 +702,13 @@ async def check_site_v2(
             _goto_try = 0
             _wait_strategies = ["domcontentloaded", "load", "commit"]
             _proxy_dropped = False
+            _goto_response = None
             while True:
                 strategy = _wait_strategies[
                     min(_goto_try, len(_wait_strategies) - 1)
                 ]
                 try:
-                    await page.goto(
+                    _goto_response = await page.goto(
                         url, wait_until=strategy,
                         timeout=45000,
                     )
@@ -819,6 +820,95 @@ async def check_site_v2(
             await step_shot(
                 page, "01_loaded", step_dir
             )
+
+            _http_status = None
+            try:
+                if _goto_response is not None:
+                    _http_status = _goto_response.status
+            except Exception:
+                _http_status = None
+            _dead_page = False
+            _dead_reason = ""
+            if _http_status and _http_status >= 400:
+                _dead_page = True
+                _dead_reason = f"HTTP {_http_status}"
+            else:
+                try:
+                    _title_check = (
+                        await page.title() or ""
+                    ).lower()
+                    if (
+                        "404" in _title_check
+                        or "not found" in _title_check
+                        or "страница не найдена"
+                        in _title_check
+                        or "страница удалена"
+                        in _title_check
+                    ):
+                        _dead_page = True
+                        _dead_reason = (
+                            f"title=«{_title_check[:40]}»"
+                        )
+                except Exception:
+                    pass
+            if _dead_page:
+                _logger.warn(
+                    f"мёртвая страница: {_dead_reason}"
+                )
+                result.update({
+                    "status": "failed",
+                    "method": "dead_url",
+                    "message": (
+                        f"Страница недоступна: "
+                        f"{_dead_reason}"
+                    ),
+                    "reason_code": "dead_url",
+                })
+                _logger.finish(result)
+                _site_logger_var.reset(_log_token)
+                return result
+
+            try:
+                _marquiz_only = await page.evaluate(
+                    r"""() => {
+                    const mq = document.querySelector(
+                        '.marquiz__modal,'
+                        + '[class*="marquiz" i]'
+                    );
+                    if (!mq) return false;
+                    const forms = Array.from(
+                        document.querySelectorAll('form')
+                    );
+                    const hasLead = forms.some(f => {
+                        const r = f.getBoundingClientRect();
+                        return r.width > 100
+                            && f.querySelector(
+                                'input[type="tel"],'
+                                + 'input[name*="phone" i]'
+                            );
+                    });
+                    return !hasLead;
+                }"""
+                )
+            except Exception:
+                _marquiz_only = False
+            if _marquiz_only:
+                _logger.warn(
+                    "только Marquiz-квиз, "
+                    "не наш кейс"
+                )
+                result.update({
+                    "status": "failed",
+                    "method": "marquiz_only",
+                    "message": (
+                        "Только Marquiz-квиз, "
+                        "лид-формы нет"
+                    ),
+                    "reason_code": "marquiz",
+                })
+                _logger.finish(result)
+                _site_logger_var.reset(_log_token)
+                return result
 
             instructions = None
             instructions_used = None

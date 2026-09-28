@@ -419,6 +419,46 @@ class PlaywrightNetworkListener:
 
 async def _fallback_detect(page, pre_text, url_changed):
     try:
+        cms_success = await page.evaluate(r"""() => {
+            const successSels = [
+                '.t-form__successbox',
+                '.t-form-success',
+                '.t-form__submit-success',
+                '.wpcf7-mail-sent-ok',
+                '.wpcf7 form.sent .wpcf7-response-output',
+                '.b24-form-success',
+                '.b24-form-content-success',
+                '.b24-form-success-icon',
+                '.jet-form-builder-message--success',
+                '.elementor-message.elementor-message-success',
+                '.form-success-message',
+                '[class*="thank"][class*="you"]',
+                '.uc-thanks',
+            ];
+            for (const s of successSels) {
+                const el = document.querySelector(s);
+                if (!el) continue;
+                try {
+                    const st = getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    if (st.display !== 'none'
+                        && st.visibility !== 'hidden'
+                        && r.width > 5 && r.height > 5)
+                        return s;
+                } catch(e) {}
+            }
+            return null;
+        }""")
+    except Exception:
+        cms_success = None
+
+    if cms_success:
+        return {
+            "state": "success",
+            "match": f"CMS success box: {cms_success}",
+        }
+
+    try:
         text = await page.evaluate(
             "() => (document.body.innerText || '')"
             ".toLowerCase()"
