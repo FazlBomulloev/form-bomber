@@ -1089,51 +1089,11 @@ FORM_EXTRACTOR_JS = r"""() => {
             f => f.tag === 'textarea');
         if (!hasNameOrEmail && !hasTextarea) continue;
         showHidden(form);
-        const data = finalize(raw, form, 'cta_no_phone');
+        const data = finalize(raw, form, 'cta_lead');
         if (!data) continue;
-        if (!hasPhoneField(data)) {
-            const usedSel = new Set(data.fields.filter(
-                f => ['name','firstname','lastname','email',
-                    'comment','date'].includes(f.role))
-                .map(f => f.selector));
-            let phoneTarget = form.querySelector(
-                'input[type="tel"],input[inputmode="numeric"]');
-            if (!phoneTarget) {
-                for (const inp of form.querySelectorAll(
-                    'input[type="text"],input:not([type])')) {
-                    if (!isVisible(inp)) continue;
-                    if ((inp.value || '').trim()) continue;
-                    const s = buildSelector(inp);
-                    if (s && usedSel.has(s)) continue;
-                    phoneTarget = inp; break;
-                }
-            }
-            if (phoneTarget) {
-                const psel = buildSelector(phoneTarget);
-                if (psel) {
-                    data.fields.unshift({
-                        tag: phoneTarget.tagName.toLowerCase(),
-                        type: (phoneTarget.type || '').toLowerCase(),
-                        name: phoneTarget.name || '',
-                        id: phoneTarget.id || '',
-                        placeholder: (
-                            phoneTarget.placeholder || '').trim(),
-                        label: getLabel(phoneTarget),
-                        role: 'phone',
-                        confidence: 0.4,
-                        alternatives: [],
-                        visible: isVisible(phoneTarget),
-                        required: false,
-                        selector: psel,
-                        priority: 0,
-                        validation: null,
-                        mask: null,
-                        phone_fallback: true,
-                    });
-                    data.phone_fallback_hint = psel;
-                }
-            }
-        }
+        // берём только формы, где поле телефона реально есть;
+        // подстановку телефона в случайное поле убрали
+        if (!hasPhoneField(data)) continue;
         return data;
     }
 
