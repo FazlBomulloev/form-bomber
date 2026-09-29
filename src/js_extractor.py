@@ -614,24 +614,34 @@ FORM_EXTRACTOR_JS = r"""() => {
         if (hasEmail && !hasPhone && visibleFields <= 2)
             score -= 25;
 
-        const html = (container.innerHTML||'').toLowerCase();
+        // Ключевые слова ищем только в видимых сигналах — тексте
+        // кнопок и заголовков, но НЕ в тексте согласия и не по всему
+        // innerHTML: «отзыв согласия» в чекбоксе ПД не должен
+        // штрафовать форму заявки как форму отзывов.
+        const btnEls = Array.from(container.querySelectorAll(
+            'button, input[type="submit"], input[type="button"]'));
+        const btnText = btnEls.map(
+            b => ((b.innerText||b.value||'')+'')).join(' ')
+            .toLowerCase();
+        let headText = '';
+        for (const h of container.querySelectorAll(
+            'h1,h2,h3,h4,h5,h6')) {
+            headText += ' ' + (h.innerText||'');
+        }
+        headText = headText.toLowerCase();
+        const sig = btnText + ' ' + headText;
 
-        const searchBtn = Array.from(container.querySelectorAll(
-            'button, input[type="submit"]')).some(b => {
-                const t = ((b.innerText||b.value||'')+'').toLowerCase();
-                return /search|найти|поиск/i.test(t);
-            });
+        const searchBtn = /search|найти|поиск/i.test(btnText);
         if (searchBtn && !hasPhone) score -= 50;
 
-        if (/заказать звонок|перезвон|callback/.test(html))
+        if (/заказать звонок|перезвон|callback/.test(sig))
             score += 20;
-        else if (/консультац/.test(html)) score += 12;
-        else if (/записаться|запись/.test(html)) score += 8;
-        if (/поиск|search|найти/.test(html)) score -= 25;
-        if (/подписаться|subscribe|newsletter/.test(html))
+        else if (/консультац/.test(sig)) score += 12;
+        else if (/записаться|запись/.test(sig)) score += 8;
+        if (/поиск|search|найти/.test(btnText)) score -= 25;
+        if (/подписаться|subscribe|newsletter/.test(sig))
             score -= 20;
-        if (/отзыв|review/.test(html)) score -= 30;
-        if (/логин|войти|sign.?in|log.?in/.test(html)
+        if (/войти|sign.?in|log.?in/.test(btnText)
             && hasPassword) score -= 40;
 
         const textareas = container.querySelectorAll('textarea');
