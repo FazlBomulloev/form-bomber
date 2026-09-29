@@ -904,11 +904,14 @@ async def _select_first(page, sel, sel_type="native"):
     try:
         await page.evaluate(r"""el => {
             if (el.tagName === 'SELECT') {
+                const ph = /выбер|укажите|не выбра|choose|select|^\s*[-—]+\s*$|^\s*$/i;
                 const opts = Array.from(el.options);
                 const real = opts.find(
                     o => o.value
                         && o.value !== ''
+                        && o.value !== '0'
                         && !o.disabled
+                        && !ph.test((o.text||'').trim())
                 );
                 if (real) {
                     el.value = real.value;
