@@ -2877,8 +2877,10 @@ async def submit_with_retry(
             )
 
         if state == "likely_success":
-            state = "success"
-            dom["state"] = "success"
+            # косвенный признак: НЕ подтверждённый успех.
+            # confirmed остаётся только у явного state=="success".
+            state = "likely"
+            dom["state"] = "likely"
         elif state == "likely_failed":
             state = "unchanged"
             dom["state"] = "unchanged"
@@ -2918,12 +2920,19 @@ async def submit_with_retry(
                     est = esc_resp.status
                 except Exception:
                     est = None
-                if se in ("success", "likely_success") or (
+                if se == "success":
+                    dom_e["state"] = "success"
+                    dom_e.setdefault(
+                        "match",
+                        f"escalated POST {est}",
+                    )
+                    return dom_e
+                if se == "likely_success" or (
                     est is not None
                     and 200 <= est < 400
                     and se in ("unchanged", "likely_failed")
                 ):
-                    dom_e["state"] = "success"
+                    dom_e["state"] = "likely"
                     dom_e.setdefault(
                         "match",
                         f"escalated POST {est}",
@@ -2952,13 +2961,17 @@ async def submit_with_retry(
                 except Exception:
                     continue
                 s_late = dom_late.get("state", "unchanged")
-                if s_late in (
-                    "success", "likely_success",
-                ):
-                    dom_late["state"] = "success"
+                if s_late == "success":
                     if log:
                         log.ok(
                             "late POST пойман → success"
+                        )
+                    return dom_late
+                if s_late == "likely_success":
+                    dom_late["state"] = "likely"
+                    if log:
+                        log.ok(
+                            "late POST пойман → likely"
                         )
                     return dom_late
                 if s_late not in (
@@ -3057,10 +3070,10 @@ async def submit_with_retry(
                         "match": "",
                     }
                 s2 = dom2.get("state", "unchanged")
-                if s2 in (
-                    "success", "likely_success",
-                ):
-                    dom2["state"] = "success"
+                if s2 == "success":
+                    return dom2
+                if s2 == "likely_success":
+                    dom2["state"] = "likely"
                     return dom2
                 if s2 == "unchanged":
                     await asyncio.sleep(2)
@@ -3088,10 +3101,10 @@ async def submit_with_retry(
                     s3 = dom3.get(
                         "state", "unchanged"
                     )
-                    if s3 in (
-                        "success", "likely_success",
-                    ):
-                        dom3["state"] = "success"
+                    if s3 == "success":
+                        return dom3
+                    if s3 == "likely_success":
+                        dom3["state"] = "likely"
                         return dom3
 
         if state == "captcha_required":

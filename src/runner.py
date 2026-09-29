@@ -599,6 +599,16 @@ async def _try_fill_and_submit(
                 f"{dom_result.get('match', '')}"
             ),
         }, fill_result
+    if state == "likely":
+        return {
+            "status": "uncertain",
+            "method": f"form_{method_name}",
+            "message": (
+                "Вероятно отправлено: "
+                + dom_result.get("match", "")
+            ),
+            "reason_code": "likely",
+        }, fill_result
     if state == "validation_error":
         return {
             "status": "failed",
@@ -1110,8 +1120,13 @@ async def check_site_v2(
                 form_json = None
                 iframe_ctx = None
 
+            _maybe_sent = (
+                result["status"] == "uncertain"
+                and submit_attempted_var.get()
+            )
             if (
                 result["status"] != "success"
+                and not _maybe_sent
                 and ai_key
             ):
                 _logger.step(
