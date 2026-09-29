@@ -858,19 +858,31 @@ FORM_EXTRACTOR_JS = r"""() => {
             const selector = buildSelector(el);
             if (!selector) continue;
 
+            const _label = getLabel(el);
+            const _clsAttr = (el.className || '')
+                .toString().toLowerCase();
+            const _isRequired = !!(
+                el.required
+                || el.getAttribute('aria-required') === 'true'
+                || el.hasAttribute('data-tilda-req')
+                || el.hasAttribute('data-required')
+                || el.hasAttribute('data-rule-required')
+                || /\brequired\b/.test(_clsAttr)
+                || /\*/.test(_label)
+            );
+
             const fld = {
                 tag: el.tagName.toLowerCase(),
                 type: type,
                 name: el.name || '',
                 id: el.id || '',
                 placeholder: (el.placeholder||'').trim(),
-                label: getLabel(el),
+                label: _label,
                 role: cls.role,
                 confidence: cls.confidence,
                 alternatives: cls.alternatives,
                 visible: isVisible(el),
-                required: el.required
-                    || el.getAttribute('aria-required') === 'true',
+                required: _isRequired,
                 selector: selector,
                 priority: vis ? 0 : 1,
                 validation: extractValidation(el),
