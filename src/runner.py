@@ -48,7 +48,7 @@ from calltouch import try_calltouch
 
 _ai_sem = asyncio.Semaphore(AI_CONCURRENCY)
 _ws_clients: set = set()
-_browsers: list = []
+_browsers: dict = {}
 _pw = None
 _browser_lock = asyncio.Lock()
 BROWSER_RECYCLE_AFTER = 15
@@ -338,6 +338,7 @@ def _make_slot(browser) -> dict:
     slot = {
         "browser": browser,
         "uses": 0,
+        "active": 0,
         "started_at": time.monotonic(),
         "alive": True,
     }
@@ -351,14 +352,15 @@ def _make_slot(browser) -> dict:
     return slot
 
 def _mark_slot_dead_by_obj(browser):
-    for s in _browsers:
+    for s in _browsers.values():
         if s.get("browser") is browser:
             s["alive"] = False
             return
 
 def _mark_browser_dead(idx: int):
-    if 0 <= idx < len(_browsers):
-        _browsers[idx]["alive"] = False
+    slot = _browsers.get(idx)
+    if slot is not None:
+        slot["alive"] = False
 
 def _slot_needs_recycle(slot: dict) -> bool:
     if not slot.get("alive", False):
@@ -372,12 +374,12 @@ def _slot_needs_recycle(slot: dict) -> bool:
 
 async def _reset_browsers():
     global _browsers, _pw
-    for s in list(_browsers):
+    for s in list(_browsers.values()):
         try:
             await s["browser"].close()
         except Exception:
             pass
-    _browsers = []
+    _browsers = {}
     try:
         if _pw:
             await _pw.stop()
@@ -385,50 +387,49 @@ async def _reset_browsers():
         pass
     _pw = None
 
-async def _ensure_browsers(count: int = 2):
-    global _browsers, _pw
-    async with _browser_lock:
-        alive = []
-        for s in _browsers:
-            if _slot_needs_recycle(s):
-                try:
-                    await s["browser"].close()
-                except Exception:
-                    pass
-                continue
-            alive.append(s)
-        _browsers = alive
-        if len(_browsers) >= count:
-            return [s["browser"] for s in _browsers[:count]]
-        if _pw is None:
-            _pw = await async_playwright().start()
-        while len(_browsers) < count:
-            br = await _pw.chromium.launch(
-                headless=True,
-                args=_CHROMIUM_ARGS,
-            )
-            _browsers.append(_make_slot(br))
-        return [s["browser"] for s in _browsers[:count]]
+async def _launch_browser():
+    global _pw
+    if _pw is None:
+        _pw = await async_playwright().start()
+    return await _pw.chromium.launch(
+        headless=True,
+        args=_CHROMIUM_ARGS,
+    )
 
 async def _get_browser(idx: int = 0):
-    browsers = await _ensure_browsers(max(1, idx + 1))
-    real_idx = idx % len(browsers)
-    if real_idx < len(_browsers):
-        _browsers[real_idx]["uses"] += 1
-    return browsers[real_idx]
+    async with _browser_lock:
+        slot = _browsers.get(idx)
+        if slot is not None and _slot_needs_recycle(slot):
+            if slot.get("active", 0) <= 0:
+                try:
+                    await slot["browser"].close()
+                except Exception:
+                    pass
+                _browsers.pop(idx, None)
+                slot = None
+        if slot is None:
+            br = await _launch_browser()
+            slot = _make_slot(br)
+            _browsers[idx] = slot
+        slot["uses"] += 1
+        slot["active"] = slot.get("active", 0) + 1
+        return slot["browser"]
+
+async def _release_slot(idx: int = 0):
+    async with _browser_lock:
+        slot = _browsers.get(idx)
+        if slot is None:
+            return
+        slot["active"] = max(0, slot.get("active", 0) - 1)
+        if slot["active"] <= 0 and _slot_needs_recycle(slot):
+            _browsers.pop(idx, None)
+            try:
+                await slot["browser"].close()
+            except Exception:
+                pass
 
 async def _recycle_browser_if_needed(idx: int = 0):
-    global _browsers
-    async with _browser_lock:
-        if idx < 0 or idx >= len(_browsers):
-            return
-        if not _slot_needs_recycle(_browsers[idx]):
-            return
-        s = _browsers.pop(idx)
-        try:
-            await s["browser"].close()
-        except Exception:
-            pass
+    await _release_slot(idx)
 
 async def _ws_broadcast(data: dict):
     msg = json.dumps(data, ensure_ascii=False)
