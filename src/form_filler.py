@@ -2538,7 +2538,7 @@ async def _escalate_submit(page, form_el, pred):
             try:
                 resp = await asyncio.wait_for(
                     asyncio.shield(resp_task),
-                    timeout=1.5,
+                    timeout=6.0,
                 )
             except Exception:
                 resp = None
@@ -2804,7 +2804,7 @@ async def submit_with_retry(
                 try:
                     form_post_resp = await asyncio.wait_for(
                         asyncio.shield(resp_task),
-                        timeout=1.5,
+                        timeout=6.0,
                     )
                 except Exception:
                     form_post_resp = None

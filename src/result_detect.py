@@ -1045,7 +1045,10 @@ async def detect_submission_result(
 
     if (
         dom_result.get("state") == "likely_success"
-        and "form reset" in dom_result.get("match", "")
+        and (
+            "form reset" in dom_result.get("match", "")
+            or "form disappeared" in dom_result.get("match", "")
+        )
     ):
         has_our_post = False
         if net_listener:
@@ -1056,12 +1059,12 @@ async def detect_submission_result(
         if not has_our_post:
             if _log:
                 _log.warn(
-                    "form_reset без нашего POST — "
+                    "форма исчезла/сброшена без нашего POST — "
                     "понижаем до unchanged",
                 )
             dom_result = {
                 "state": "unchanged",
-                "match": "form reset (unverified)",
+                "match": "form gone (unverified)",
             }
 
     ds = dom_result.get("state")
