@@ -69,6 +69,7 @@ _queue_cancel = asyncio.Event()
 _active_tasks: set = set()
 _active_contexts: set = set()
 _active_queue_task = None
+_dead_proxy_servers: set = set()
 LOG_DIR = Path("data/logs")
 
 def _cleanup_data_except_db():
@@ -676,6 +677,11 @@ async def check_site_v2(
             "ignore_https_errors": True,
         }
         ctx_kwargs = build_stealth_context_kwargs(ctx_kwargs)
+        if proxy and proxy.get("server") in _dead_proxy_servers:
+            _logger.warn(
+                "прокси помечен мёртвым ранее, идём напрямую",
+            )
+            proxy = None
         if proxy:
             ctx_kwargs["proxy"] = proxy
         for _br_try in range(2):
@@ -765,6 +771,12 @@ async def check_site_v2(
                             "retry без прокси",
                         )
                         _proxy_dropped = True
+                        try:
+                            _srv = proxy.get("server")
+                            if _srv:
+                                _dead_proxy_servers.add(_srv)
+                        except AttributeError:
+                            pass
                         try:
                             await ctx.close()
                         except Exception:
