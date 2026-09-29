@@ -852,6 +852,17 @@ FORM_EXTRACTOR_JS = r"""() => {
     function extractContainer(container) {
         const fields = [];
         const checkboxes = [];
+        let _fbSeq = 0;
+        const _stamp = (el) => {
+            let id = el.getAttribute('data-fb-id');
+            if (!id) {
+                window.__fbSeq = (window.__fbSeq || 0) + 1;
+                id = 'fb' + window.__fbSeq;
+                try { el.setAttribute('data-fb-id', id); }
+                catch(e) {}
+            }
+            return id;
+        };
         const allInputs = container.querySelectorAll(
             'input:not([type="hidden"])'
             + ':not([type="submit"])'
@@ -887,6 +898,7 @@ FORM_EXTRACTOR_JS = r"""() => {
                 type: type,
                 name: el.name || '',
                 id: el.id || '',
+                fb_id: _stamp(el),
                 placeholder: (el.placeholder||'').trim(),
                 label: _label,
                 role: cls.role,
@@ -929,6 +941,7 @@ FORM_EXTRACTOR_JS = r"""() => {
             if (type === 'checkbox') {
                 checkboxes.push({
                     selector: selector,
+                    fb_id: fld.fb_id,
                     role: cls.role === 'checkbox_consent'
                         ? 'consent' : 'other',
                     confidence: cls.confidence,
@@ -971,6 +984,7 @@ FORM_EXTRACTOR_JS = r"""() => {
 
         const sub = findSubmit(container);
         const strategy = detectSubmitStrategy(container, sub.el);
+        const submitFbId = sub.el ? _stamp(sub.el) : null;
 
         const captcha = detectCaptcha(container);
         const honeypots = detectHoneypots(container);
@@ -979,6 +993,7 @@ FORM_EXTRACTOR_JS = r"""() => {
         return {
             form_selector: formSelector,
             submit_selector: sub.selector,
+            submit_fb_id: submitFbId,
             submit_strategy: strategy,
             fields: fields,
             checkboxes: checkboxes,

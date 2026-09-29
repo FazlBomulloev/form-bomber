@@ -1657,6 +1657,12 @@ async def execute_action_plan(
         sel = act.get("selector", "")
         field = act.get("field", "")
         value_tmpl = act.get("value", "")
+        # адресация по data-fb-id (устойчива к нескольким формам на
+        # странице); исходный селектор — фолбэк, find_el делит по «,»
+        _fb = act.get("fb_id")
+        if _fb:
+            _fb_sel = '[data-fb-id="' + _fb + '"]'
+            sel = _fb_sel + ((", " + sel) if sel else "")
 
         if action == "submit":
             submit_sel = sel

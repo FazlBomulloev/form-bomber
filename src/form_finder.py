@@ -1402,6 +1402,7 @@ def build_smart_plan(form_json: dict) -> dict:
                 "step": step, "action": "fill",
                 "field": role,
                 "selector": f["selector"],
+                "fb_id": f.get("fb_id"),
                 "value": value,
             })
             step += 1
@@ -1418,6 +1419,7 @@ def build_smart_plan(form_json: dict) -> dict:
             "step": step, "action": "click",
             "field": "checkbox",
             "selector": f["selector"],
+            "fb_id": f.get("fb_id"),
         })
         step += 1
 
@@ -1431,6 +1433,7 @@ def build_smart_plan(form_json: dict) -> dict:
             "action": "select_first",
             "field": "dropdown",
             "selector": f["selector"],
+            "fb_id": f.get("fb_id"),
             "type": "native",
         })
         step += 1
@@ -1449,6 +1452,7 @@ def build_smart_plan(form_json: dict) -> dict:
             "step": step, "action": "click",
             "field": "radio",
             "selector": f["selector"],
+            "fb_id": f.get("fb_id"),
         })
         step += 1
 
@@ -1457,6 +1461,7 @@ def build_smart_plan(form_json: dict) -> dict:
             "step": step, "action": "submit",
             "field": "submit",
             "selector": submit_sel,
+            "fb_id": form_json.get("submit_fb_id"),
         })
 
     has_captcha = any(
