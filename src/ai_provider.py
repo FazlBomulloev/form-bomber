@@ -361,6 +361,7 @@ def _claude_call(prompt, system, api_key, screenshot_b64=None):
         json={
             "model": CLAUDE_MODEL,
             "max_tokens": 1024,
+            "temperature": 0,
             "system": system,
             "messages": [
                 {"role": "user",
@@ -526,6 +527,161 @@ def ask_ai_sync(page_html, url, api_key, provider=None,
     if last_exc is not None:
         raise last_exc
     raise RuntimeError("AI: все провайдеры недоступны")
+
+_CANDIDATE_SYSTEM = (
+    "Ты — эксперт по HTML-формам. Тебе дают поля формы заявки с "
+    "идентификаторами fb_id и фрагмент HTML. Верни СТРОГО один "
+    "JSON-объект, без markdown и пояснений."
+)
+
+_CANDIDATE_PROMPT = """\
+Форма заявки российской компании. Для каждого поля определи, что в \
+него вписать. Отвечай идентификаторами fb_id, НЕ селекторами.
+
+Формат ответа (compact JSON):
+{"fields":{"fb3":"{phone}","fb2":"{name}","fb7":"Москва"},\
+"consent":["fb8"],"submit":"fb9"}
+
+- fields: fb_id -> значение. Плейсхолдеры (движок подставит сам):
+  {phone},{name},{firstname},{lastname},{patronymic},{email},\
+{comment}. Для города/услуги/темы дай конкретный правдоподобный \
+текст. Поля, которые заполнять не нужно, пропусти.
+- consent: fb_id чекбоксов согласия, которые надо отметить.
+- submit: fb_id кнопки отправки.
+
+Поля формы (JSON):
+%%FIELDS%%
+
+Фрагмент HTML:
+%%HTML%%"""
+
+
+def _candidate_fields(form_json):
+    out = []
+    for f in form_json.get("fields") or []:
+        if not f.get("fb_id"):
+            continue
+        out.append({
+            "fb_id": f.get("fb_id"),
+            "role": f.get("role"),
+            "conf": round(f.get("confidence") or 0, 2),
+            "label": (f.get("label") or "")[:60],
+            "name": f.get("name") or "",
+            "type": f.get("type") or "",
+            "tag": f.get("tag") or "",
+            "required": bool(f.get("required")),
+        })
+    return out
+
+
+def _candidate_plan_from_ai(form_json, ai_obj):
+    by_id = {
+        f.get("fb_id"): f
+        for f in form_json.get("fields") or []
+        if f.get("fb_id")
+    }
+    actions = []
+    step = 1
+    for fb_id, value in (ai_obj.get("fields") or {}).items():
+        fld = by_id.get(fb_id)
+        if not fld:
+            continue
+        tag = (fld.get("tag") or "").lower()
+        act = "select_first" if tag == "select" else "fill"
+        entry = {
+            "step": step,
+            "action": act,
+            "field": fld.get("role") or "field",
+            "fb_id": fb_id,
+            "selector": fld.get("selector") or "",
+        }
+        if act == "fill":
+            entry["value"] = value
+        actions.append(entry)
+        step += 1
+    for fb_id in ai_obj.get("consent") or []:
+        fld = by_id.get(fb_id)
+        actions.append({
+            "step": step, "action": "click",
+            "field": "checkbox", "fb_id": fb_id,
+            "selector": (fld or {}).get("selector") or "",
+        })
+        step += 1
+    submit_id = ai_obj.get("submit")
+    if submit_id:
+        fld = by_id.get(submit_id)
+        actions.append({
+            "step": step, "action": "submit",
+            "field": "submit", "fb_id": submit_id,
+            "selector": (
+                (fld or {}).get("selector")
+                or form_json.get("submit_selector") or ""
+            ),
+        })
+    return {
+        "form_found": bool(actions),
+        "form_selector": form_json.get("form_selector"),
+        "actions": actions,
+        "has_captcha": bool(form_json.get("captcha_hint")),
+        "captcha_type": None,
+        "honeypots": form_json.get("honeypots") or [],
+        "csrf_token": form_json.get("csrf_token"),
+        "notes": "AI: выбор по кандидату",
+    }
+
+
+def ask_ai_candidate(
+    form_json, html_fragment, url, api_key, provider=None,
+):
+    import json as _json
+    fields = _candidate_fields(form_json)
+    prompt = _CANDIDATE_PROMPT.replace(
+        "%%FIELDS%%",
+        _json.dumps(fields, ensure_ascii=False),
+    ).replace("%%HTML%%", (html_fragment or "")[:6000])
+
+    provider = (provider or DEFAULT_PROVIDER).lower()
+    if provider not in AI_PROVIDERS:
+        provider = DEFAULT_PROVIDER
+
+    order = [provider] + [
+        p for p in AI_PROVIDERS if p != provider
+    ]
+    total_tokens = 0
+    last_exc = None
+    for prov in order:
+        key = api_key or _env_key(prov)
+        if not key:
+            continue
+        try:
+            if prov == "deepseek":
+                data = _retry(
+                    _deepseek_call, prompt,
+                    _CANDIDATE_SYSTEM, key, retries=1,
+                )
+                content, tokens = _extract_deepseek(data)
+            else:
+                data = _retry(
+                    _claude_call, prompt,
+                    _CANDIDATE_SYSTEM, key, None,
+                    retries=1,
+                )
+                content, tokens = _extract_claude(data)
+            total_tokens += tokens
+            ai_obj = _parse(content)
+            return (
+                _candidate_plan_from_ai(form_json, ai_obj),
+                total_tokens, prov,
+            )
+        except Exception as e:
+            total_tokens += getattr(e, "tokens", 0)
+            last_exc = e
+            continue
+    if last_exc is not None:
+        if hasattr(last_exc, "tokens"):
+            last_exc.tokens = total_tokens
+        raise last_exc
+    raise RuntimeError("AI: нет доступного провайдера")
 
 async def collect_full_html(page):
     parts = []

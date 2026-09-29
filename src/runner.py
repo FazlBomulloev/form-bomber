@@ -30,7 +30,7 @@ from db import (
     db_delete_form_profile,
 )
 from ai_provider import (
-    ask_ai_sync, collect_full_html,
+    ask_ai_sync, collect_full_html, ask_ai_candidate,
 )
 from form_finder import (
     extract_forms, build_smart_plan, heuristic_confident,
@@ -1225,24 +1225,53 @@ async def check_site_v2(
                     "ai",
                     f"отправляем HTML в {ai_provider}",
                 )
-                page_html = await collect_full_html(
-                    page
-                )
+                # режим выбора кандидата: если эвристика нашла форму,
+                # отдаём AI её поля с fb_id и фрагмент, а не весь HTML
+                _cand_fj = _saved_form_json
+                _frag = ""
+                if _cand_fj and _cand_fj.get("fields"):
+                    _fsel = _cand_fj.get("form_selector")
+                    _fctx = iframe_ctx or page
+                    if _fsel:
+                        try:
+                            _frag = await _fctx.eval_on_selector(
+                                _fsel, "e => e.outerHTML",
+                            ) or ""
+                        except Exception:
+                            _frag = ""
+                page_html = ""
                 async with _ai_sem:
                     try:
-                        (
-                            ai_plan, ai_tokens, _,
-                        ) = await asyncio.to_thread(
-                            ask_ai_sync,
-                            page_html, url, ai_key,
-                            ai_provider, None,
-                        )
+                        if _cand_fj and _cand_fj.get("fields"):
+                            (
+                                ai_plan, ai_tokens, _,
+                            ) = await asyncio.to_thread(
+                                ask_ai_candidate,
+                                _cand_fj, _frag, url,
+                                ai_key, ai_provider,
+                            )
+                            _logger.log_ai(
+                                f"candidate frag={len(_frag)}",
+                                ai_plan, ai_tokens,
+                                ai_provider,
+                            )
+                        else:
+                            page_html = (
+                                await collect_full_html(page)
+                            )
+                            (
+                                ai_plan, ai_tokens, _,
+                            ) = await asyncio.to_thread(
+                                ask_ai_sync,
+                                page_html, url, ai_key,
+                                ai_provider, None,
+                            )
+                            _logger.log_ai(
+                                f"html={len(page_html)}",
+                                ai_plan, ai_tokens,
+                                ai_provider,
+                            )
                         tokens += ai_tokens
-                        _logger.log_ai(
-                            f"html={len(page_html)}",
-                            ai_plan, ai_tokens,
-                            ai_provider,
-                        )
                     except Exception as e:
                         raw_text = getattr(
                             e, "raw_text", "",
