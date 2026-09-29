@@ -701,7 +701,7 @@ async def check_site_v2(
         try:
             _logger.step("navigate", url)
             _goto_try = 0
-            _wait_strategies = ["domcontentloaded", "load", "commit"]
+            _wait_strategies = ["commit", "domcontentloaded"]
             _proxy_dropped = False
             _goto_response = None
             while True:
@@ -711,7 +711,7 @@ async def check_site_v2(
                 try:
                     _goto_response = await page.goto(
                         url, wait_until=strategy,
-                        timeout=45000,
+                        timeout=20000,
                     )
                     break
                 except Exception as _ge:
@@ -789,7 +789,13 @@ async def check_site_v2(
                         await asyncio.sleep(1)
                         continue
                     raise
-            await asyncio.sleep(2)
+            try:
+                await page.wait_for_load_state(
+                    "domcontentloaded", timeout=8000,
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(1)
 
             try:
                 await page.evaluate(
