@@ -100,6 +100,42 @@ FORM_EXTRACTOR_JS = r"""() => {
                     .trim().substring(0, 120);
             } catch(e) {}
         }
+        // подпись поля у Tilda / Bitrix
+        const wrap = el.closest(
+            '.t-input-group,.form-group,.field,'
+            + '[class*="form-field" i],[class*="input" i]');
+        if (wrap) {
+            const t = wrap.querySelector(
+                '.t-input-title,.form-label,label,'
+                + '[class*="title" i],[class*="label" i]');
+            if (t) {
+                const tt = (t.innerText||'').trim();
+                if (tt && tt.length < 120) return tt;
+            }
+        }
+        // текст непосредственно перед полем
+        const prev = el.previousElementSibling;
+        if (prev) {
+            const pt = (prev.innerText||'').trim();
+            if (pt && pt.length < 80) return pt;
+        }
+        // соседняя ячейка таблицы (label в левом/верхнем td)
+        const td = el.closest('td');
+        if (td) {
+            const prevTd = td.previousElementSibling;
+            if (prevTd) {
+                const ct = (prevTd.innerText||'').trim();
+                if (ct && ct.length < 80) return ct;
+            }
+        }
+        // плавающая метка после поля в той же обёртке
+        const next = el.nextElementSibling;
+        if (next && next.tagName === 'LABEL') {
+            const nt = (next.innerText||'').trim();
+            if (nt && nt.length < 120) return nt;
+        }
+        const title = el.getAttribute('title');
+        if (title) return title.trim().substring(0, 120);
         return '';
     }
 
