@@ -166,16 +166,16 @@ class PlaywrightNetworkListener:
                     post_data = req.post_data or ""
                 except Exception:
                     pass
+                is_ours = self._is_our_request(post_data)
                 self._raw.append({
                     "resp": response,
                     "url": url[:300],
                     "status": response.status,
-                    "post_data": post_data[:500],
+                    "post_data": post_data[:4000],
+                    "is_ours": is_ours,
                 })
                 if log:
-                    has_phone = self._is_our_request(
-                        post_data,
-                    )
+                    has_phone = is_ours
                     log.step(
                         "net_capture",
                         f"{req.method} "
@@ -267,9 +267,9 @@ class PlaywrightNetworkListener:
             url = entry["url"]
             status = entry["status"]
             post_data = entry["post_data"]
-            is_ours = self._is_our_request(
-                post_data,
-            )
+            is_ours = entry.get("is_ours")
+            if is_ours is None:
+                is_ours = self._is_our_request(post_data)
 
             body = ""
             try:
@@ -1050,9 +1050,7 @@ async def detect_submission_result(
         has_our_post = False
         if net_listener:
             for entry in net_listener._raw:
-                if net_listener._is_our_request(
-                    entry.get("post_data", ""),
-                ):
+                if entry.get("is_ours"):
                     has_our_post = True
                     break
         if not has_our_post:
