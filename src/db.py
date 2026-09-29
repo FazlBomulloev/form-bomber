@@ -119,6 +119,17 @@ async def db_init():
                 )
             except Exception:
                 pass
+        for col, default in [
+            ("trigger_text", "TEXT DEFAULT ''"),
+            ("form_fingerprint", "TEXT DEFAULT ''"),
+        ]:
+            try:
+                await db.execute(
+                    "ALTER TABLE form_profiles "
+                    f"ADD COLUMN {col} {default}"
+                )
+            except Exception:
+                pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS queue_groups (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -427,6 +438,8 @@ async def db_save_form_profile(
     success_method: str,
     success_signal: str,
     success_match: str,
+    trigger_text: str = "",
+    form_fingerprint: str = "",
 ):
     actions_json = json.dumps(
         actions, ensure_ascii=False,
@@ -437,9 +450,10 @@ async def db_save_form_profile(
             "domain,form_selector,submit_selector,"
             "actions_json,has_captcha,captcha_type,"
             "success_method,success_signal,"
-            "success_match,success_count,fail_count,"
+            "success_match,trigger_text,form_fingerprint,"
+            "success_count,fail_count,"
             "last_success_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,1,0,"
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,1,0,"
             "datetime('now','localtime')) "
             "ON CONFLICT(domain) DO UPDATE SET "
             "form_selector=excluded.form_selector,"
@@ -450,6 +464,8 @@ async def db_save_form_profile(
             "success_method=excluded.success_method,"
             "success_signal=excluded.success_signal,"
             "success_match=excluded.success_match,"
+            "trigger_text=excluded.trigger_text,"
+            "form_fingerprint=excluded.form_fingerprint,"
             "success_count=success_count+1,"
             "fail_count=0,"
             "last_success_at="
@@ -462,6 +478,8 @@ async def db_save_form_profile(
                 success_method or "",
                 success_signal or "",
                 (success_match or "")[:200],
+                (trigger_text or "")[:120],
+                (form_fingerprint or "")[:500],
             ),
         )
         await db.commit()

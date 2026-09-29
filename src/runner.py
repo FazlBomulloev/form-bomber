@@ -199,8 +199,28 @@ def _has_unstable_selectors(instructions: dict) -> bool:
         return True
     return False
 
+def _profile_key(url: str) -> str:
+    d = domain_from_url(url)
+    try:
+        path = urlparse(url).path or "/"
+    except ValueError:
+        path = "/"
+    path = path.rstrip("/") or "/"
+    return d + path
+
+
+def _form_fingerprint(form_json: dict) -> str:
+    fields = (form_json or {}).get("fields") or []
+    fp = [
+        [f.get("tag"), f.get("type"), f.get("name")]
+        for f in fields
+    ]
+    return json.dumps(fp, ensure_ascii=False)
+
+
 async def _maybe_save_profile(
     domain: str, result: dict, instructions: dict,
+    form_json: dict = None, trigger_text: str = "",
 ):
     if result.get("status") != "success":
         return
@@ -244,6 +264,8 @@ async def _maybe_save_profile(
                 result.get("message", ""),
             ),
             success_match=result.get("message", ""),
+            trigger_text=trigger_text or "",
+            form_fingerprint=_form_fingerprint(form_json),
         )
         if log:
             log.ok(f"profile_cache: сохранён для {domain}")
@@ -660,6 +682,7 @@ async def check_site_v2(
     browser_idx: int = 0,
 ):
     domain = domain_from_url(url)
+    profile_key = _profile_key(url)
     sid_log_dir = (
         LOG_DIR / session_id if session_id else LOG_DIR
     )
@@ -667,6 +690,8 @@ async def check_site_v2(
     _logger = SiteLogger(domain, url, sid_log_dir)
     _log_token = _site_logger_var.set(_logger)
     ctx = None
+    _saved_form_json = None
+    _saved_trigger = ""
 
     result = {
         "url": url, "status": "failed",
@@ -948,7 +973,7 @@ async def check_site_v2(
 
             if attempt_no == 1:
                 cached = await db_get_form_profile(
-                    domain,
+                    profile_key,
                 )
                 if cached and _is_profile_usable(cached):
                     cache_tried = True
@@ -960,16 +985,41 @@ async def check_site_v2(
                     cached_instr = (
                         _profile_to_instructions(cached)
                     )
-                    sub_c, _fill_c = (
-                        await _try_fill_and_submit(
-                            page, cached_instr, phone,
-                            firstname, lastname,
-                            patronymic,
-                            email, comment,
-                            rucaptcha_key, url,
-                            step_dir, "cached",
+                    # сверка отпечатка формы перед отправкой:
+                    # если форма изменилась — НЕ отправляем
+                    fp_ok = True
+                    cached_fp = cached.get("form_fingerprint")
+                    if cached_fp:
+                        try:
+                            cur_fj, _ = await extract_forms(
+                                page
+                            )
+                        except Exception:
+                            cur_fj = None
+                        if cur_fj:
+                            fp_ok = (
+                                _form_fingerprint(cur_fj)
+                                == cached_fp
+                            )
+                        if not fp_ok:
+                            _logger.warn(
+                                "profile_cache: отпечаток "
+                                "формы не совпал, кэш "
+                                "пропущен",
+                            )
+                    if fp_ok:
+                        sub_c, _fill_c = (
+                            await _try_fill_and_submit(
+                                page, cached_instr, phone,
+                                firstname, lastname,
+                                patronymic,
+                                email, comment,
+                                rucaptcha_key, url,
+                                step_dir, "cached",
+                            )
                         )
-                    )
+                    else:
+                        sub_c = None
                     if (
                         sub_c
                         and sub_c.get("status")
@@ -981,10 +1031,10 @@ async def check_site_v2(
                         _logger.ok(
                             "profile_cache: применён успешно",
                         )
-                    else:
+                    elif fp_ok:
                         new_fc = (
                             await db_increment_profile_fail(
-                                domain,
+                                profile_key,
                             )
                         )
                         _logger.warn(
@@ -996,7 +1046,7 @@ async def check_site_v2(
                             >= PROFILE_FAIL_THRESHOLD
                         ):
                             await db_delete_form_profile(
-                                domain,
+                                profile_key,
                             )
                             _logger.warn(
                                 "profile_cache: удалён "
@@ -1066,6 +1116,12 @@ async def check_site_v2(
                 )
 
                 if form_json and form_json.get("fields"):
+                    _saved_form_json = form_json
+                    _saved_trigger = (
+                        getattr(
+                            form_ctx, "trigger_text", "",
+                        ) or ""
+                    )
                     _roles = ", ".join(
                         f"{f.get('role')}:"
                         f"{round(f.get('confidence') or 0, 2)}"
@@ -1127,8 +1183,16 @@ async def check_site_v2(
                                 "success", "captcha",
                             ):
                                 await _maybe_save_profile(
-                                    domain, result,
+                                    profile_key, result,
                                     instructions_used,
+                                    form_json=form_json,
+                                    trigger_text=(
+                                        getattr(
+                                            form_ctx,
+                                            "trigger_text",
+                                            "",
+                                        ) or ""
+                                    ),
                                 )
                                 _logger.finish(result)
                                 _site_logger_var.reset(
@@ -1363,7 +1427,9 @@ async def check_site_v2(
     )
     try:
         await _maybe_save_profile(
-            domain, result, instructions_used,
+            profile_key, result, instructions_used,
+            form_json=_saved_form_json,
+            trigger_text=_saved_trigger,
         )
     except Exception:
         pass
