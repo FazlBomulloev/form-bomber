@@ -1487,6 +1487,8 @@ def build_smart_plan(form_json: dict) -> dict:
         "has_captcha": has_captcha,
         "captcha_type": None,
         "cookie_selector": None,
+        "honeypots": form_json.get("honeypots") or [],
+        "csrf_token": form_json.get("csrf_token"),
         "success_texts": [
             "спасибо", "заявка принята",
             "перезвоним", "отправлено",

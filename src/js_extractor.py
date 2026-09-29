@@ -579,6 +579,16 @@ FORM_EXTRACTOR_JS = r"""() => {
                 || st.visibility === 'hidden'
                 || parseFloat(st.opacity||'1') < 0.05
                 || r.width < 2 || r.height < 2);
+            const clipped = (
+                (st.clip && st.clip !== 'auto'
+                    && st.clip !== 'none')
+                || (st.clipPath && st.clipPath !== 'none'
+                    && st.clipPath !== 'auto'));
+            const ariaHidden = (
+                el.getAttribute('aria-hidden') === 'true');
+            const notabTrap = (
+                el.getAttribute('tabindex') === '-1'
+                && !isVisible(el));
             const offscreen = (
                 Math.abs(parseFloat(st.left)) > 9000
                 || Math.abs(parseFloat(st.top)) > 9000);
@@ -587,7 +597,8 @@ FORM_EXTRACTOR_JS = r"""() => {
             const sig = name + ' ' + id;
             const trapName = /honeypot|website|url|fax|bot|trap|hp_/
                 .test(sig);
-            if (hiddenCss || offscreen || trapName) {
+            if (hiddenCss || clipped || ariaHidden
+                || notabTrap || offscreen || trapName) {
                 const sel = buildSelector(el);
                 if (sel) out.push(sel);
             }
