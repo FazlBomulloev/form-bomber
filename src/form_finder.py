@@ -232,6 +232,53 @@ def _is_bad_link(tag, href):
     return False
 
 
+async def _reset_page_state(page, orig_url=""):
+    """Закрыть открытую модалку и вернуть страницу в исходное
+    состояние перед кликом по следующей кнопке."""
+    try:
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.3)
+    except Exception:
+        pass
+    try:
+        await page.evaluate(
+            r"""() => {
+            const modalSel = '.modal.show,[role="dialog"],'
+                + '[aria-modal="true"],[class*="popup" i],'
+                + '[class*="modal" i]';
+            for (const el of document.querySelectorAll(
+                modalSel)) {
+                const st = getComputedStyle(el);
+                if (st.display === 'none'
+                    || st.visibility === 'hidden') continue;
+                const x = el.querySelector(
+                    '[class*="close" i],[aria-label*="закр" i],'
+                    + '[aria-label*="close" i],.t-popup__close,'
+                    + '.popup__close');
+                if (x) { try { x.click(); } catch(e) {} }
+            }
+            const ov = document.querySelector(
+                '.modal-backdrop,[class*="overlay" i],'
+                + '[class*="popup__overlay" i],.t-popup');
+            if (ov) { try { ov.click(); } catch(e) {} }
+        }"""
+        )
+        await asyncio.sleep(0.3)
+    except Exception:
+        pass
+    try:
+        if (
+            orig_url
+            and page.url.rstrip("/") != orig_url.rstrip("/")
+        ):
+            await page.go_back(
+                wait_until="domcontentloaded", timeout=8000,
+            )
+            await asyncio.sleep(0.5)
+    except Exception:
+        pass
+
+
 async def _collect_trigger_buttons(page):
     log = get_logger()
     buttons = []
@@ -1103,6 +1150,12 @@ async def extract_forms(
         )
     buttons = await _collect_trigger_buttons(page)
 
+    try:
+        _orig_url = page.url
+    except Exception:
+        _orig_url = ""
+    seen_form_fps = set()
+
     trigger_tries = 0
     for priority, text, el in buttons:
         if trigger_tries >= 10:
@@ -1158,6 +1211,22 @@ async def extract_forms(
                         form_json
                         and form_json.get("fields")
                     ):
+                        fp = tuple(
+                            (
+                                f.get("tag"),
+                                f.get("type"),
+                                f.get("name"),
+                            )
+                            for f in form_json["fields"]
+                        )
+                        if fp in seen_form_fps:
+                            if log:
+                                log.step(
+                                    "trigger_dup",
+                                    "та же форма, пропуск",
+                                )
+                            break
+                        seen_form_fps.add(fp)
                         has_phone = any(
                             f.get("role") == "phone"
                             for f in form_json["fields"]
@@ -1216,14 +1285,8 @@ async def extract_forms(
                     await new_tab.close()
                 except Exception:
                     pass
-            elif not appeared:
-                try:
-                    await page.keyboard.press(
-                        'Escape',
-                    )
-                    await asyncio.sleep(0.4)
-                except Exception:
-                    pass
+            else:
+                await _reset_page_state(page, _orig_url)
         except Exception:
             continue
 
