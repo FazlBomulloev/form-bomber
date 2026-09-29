@@ -126,6 +126,28 @@ async def _tilda_fill(page, el, value):
     except Exception:
         pass
 
+def _value_matches(field_name, expected, actual):
+    """Проверка, что значение реально проставилось.
+    Для телефона сравниваем цифры, для остальных полей —
+    нормализованное совпадение."""
+    exp = (expected or "").strip()
+    act = (actual or "").strip()
+    if not exp:
+        return True
+    if not act:
+        return False
+    if field_name == "phone":
+        exp_d = re.sub(r"\D", "", exp)
+        act_d = re.sub(r"\D", "", act)
+        if not exp_d:
+            return bool(act_d)
+        tail = exp_d[-10:]
+        return tail in act_d
+    exp_l = exp.lower()
+    act_l = act.lower()
+    return exp_l in act_l or act_l in exp_l
+
+
 async def _fill_field(page, sel, value, field_name):
     log = get_logger()
     el = await find_el(page, sel)
@@ -155,12 +177,13 @@ async def _fill_field(page, sel, value, field_name):
             ) or ""
         except Exception:
             pass
+        ok = _value_matches(field_name, value, actual)
         if log:
             log.log_action(
                 "fill(tilda)", sel, value[:30],
-                success=bool(actual.strip()),
+                success=ok,
             )
-        return bool(actual.strip()) or True
+        return ok
 
     try:
         await el.click(timeout=2000)
@@ -221,9 +244,12 @@ async def _fill_field(page, sel, value, field_name):
             except Exception:
                 pass
 
+    ok = _value_matches(field_name, value, actual)
     if log:
-        log.log_action("fill", sel, value[:30])
-    return True
+        log.log_action(
+            "fill", sel, value[:30], success=ok,
+        )
+    return ok
 
 async def _select_country_code_7(page, phone_el):
     log = get_logger()
