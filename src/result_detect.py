@@ -44,6 +44,8 @@ STRICT_ERR_PATTERN = (
     r"|\"error\"\s*:\s*true"
     r"|\"errors\"\s*:\s*\{[^}]*\""
     r"|\"status\"\s*:\s*\"?(?:fail|error|invalid)"
+    r"|\"status\"\s*:\s*\"?(?:spam|mail_failed"
+    r"|validation_failed|aborted|acceptance_missing)"
     r"|class\s*=\s*\"[^\"]*\b(?:error|invalid|fail)\b"
     r"|class\s*=\s*'[^']*\b(?:error|invalid|fail)\b"
 )
