@@ -1030,13 +1030,33 @@ FORM_EXTRACTOR_JS = r"""() => {
         if (!hasPhoneField(raw)) continue;
         const data = finalize(raw, form, 'form');
         if (!data) continue;
-        data._visibleCount = data.fields.filter(
-            f => f.visible).length;
+        const _vis = data.fields.filter(f => f.visible);
+        data._visibleCount = _vis.length;
+        data._hasName = data.fields.some(
+            f => ['name', 'firstname', 'lastname']
+                .includes(f.role));
+        // необязательные для нас поля, которые обязательны и
+        // которые нечем заполнить (роль неизвестна)
+        data._unfillableReq = data.fields.filter(
+            f => f.visible && f.required
+                && f.role === 'text_unknown').length;
+        data._hasSubmit = !!data.submit_selector;
         visibleCandidates.push(data);
     }
     if (visibleCandidates.length) {
         visibleCandidates.sort((a, b) => {
+            // 1) выше скор (тип формы: звонок/консультация/заявка)
             if (b.score !== a.score) return b.score - a.score;
+            // 2) меньше обязательных полей, которые нечем заполнить
+            if (a._unfillableReq !== b._unfillableReq)
+                return a._unfillableReq - b._unfillableReq;
+            // 3) есть поле имени
+            if (a._hasName !== b._hasName)
+                return a._hasName ? -1 : 1;
+            // 4) есть видимая кнопка отправки
+            if (a._hasSubmit !== b._hasSubmit)
+                return a._hasSubmit ? -1 : 1;
+            // 5) меньше лишних полей
             return a._visibleCount - b._visibleCount;
         });
         return visibleCandidates[0];
