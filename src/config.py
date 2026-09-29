@@ -67,7 +67,9 @@ TRIGGER_BUTTON_SEL = (
     "span[class*='btn' i], div[class*='btn' i], "
     "[data-event], [onclick], "
     "[class*='callback' i], "
-    "[data-b24-form-id], [data-param-id]"
+    "[data-b24-form-id], [data-param-id], "
+    "[data-toggle], [data-target], "
+    "[data-fancybox], [data-popup]"
 )
 
 SUCCESS_TEXTS = [

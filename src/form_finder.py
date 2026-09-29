@@ -43,6 +43,10 @@ TRIGGER_PRIORITY = [
         "получить", "узнать цену",
         "рассчитать стоимость",
         "узнать стоимость",
+        "рассчитать", "рассчитать цену",
+        "подобрать", "оформить",
+        "получить предложение",
+        "получить расчёт", "получить расчет",
         "отправить сообщение",
     ],
 ]
@@ -205,10 +209,33 @@ async def _is_widget_btn(el) -> bool:
     except Exception:
         return False
 
+_BAD_LINK_RE = re.compile(
+    r"^(?:tel:|mailto:|sms:|viber:|whatsapp:)"
+    r"|wa\.me/|api\.whatsapp\.com|t\.me/|vk\.com/|"
+    r"instagram\.com|facebook\.com",
+    re.I,
+)
+
+
+def _is_bad_link(tag, href):
+    if tag != "a" or not href:
+        return False
+    h = href.strip()
+    if _BAD_LINK_RE.search(h):
+        return True
+    if h.startswith("#") or h.lower().startswith("javascript"):
+        return False
+    # ссылка ведёт на другую страницу — клик уведёт со страницы и
+    # оборвёт обход остальных кнопок
+    if "://" in h or h.startswith("/") or "." in h.split("?")[0]:
+        return True
+    return False
+
+
 async def _collect_trigger_buttons(page):
     log = get_logger()
     buttons = []
-    seen_texts = set()
+    seen_keys = set()
     all_els = await page.query_selector_all(
         TRIGGER_BUTTON_SEL
     )
@@ -217,6 +244,34 @@ async def _collect_trigger_buttons(page):
             if not await el.is_visible():
                 continue
             if await _is_widget_btn(el):
+                continue
+            info = await el.evaluate(
+                r"""el => {
+                const tag = el.tagName.toLowerCase();
+                const href = (el.getAttribute('href')
+                    || '').trim();
+                const openers = ['data-toggle',
+                    'data-target', 'data-fancybox',
+                    'data-popup', 'data-b24-form-id',
+                    'data-param-id', 'onclick'];
+                let opener = false;
+                let target = '';
+                for (const a of openers) {
+                    if (el.hasAttribute(a)) {
+                        opener = true;
+                        target = el.getAttribute(a) || target;
+                    }
+                }
+                if (href.startsWith('#') && href.length > 1) {
+                    opener = true;
+                    target = target || href;
+                }
+                return {tag, href, opener, target};
+            }"""
+            )
+            tag = info.get("tag", "")
+            href = info.get("href", "")
+            if _is_bad_link(tag, href):
                 continue
             text = (
                 await el.inner_text()
@@ -248,21 +303,30 @@ async def _collect_trigger_buttons(page):
                         text = span_text.lower().strip()
                 except Exception:
                     pass
-            if not text or len(text) > 60:
-                continue
-            if text in seen_texts:
+            if len(text) > 60:
                 continue
             priority = len(TRIGGER_PRIORITY)
             for idx, group in enumerate(
                 TRIGGER_PRIORITY
             ):
-                if any(kw in text for kw in group):
+                if text and any(kw in text for kw in group):
                     priority = idx
                     break
-            if priority >= len(TRIGGER_PRIORITY):
+            opener = bool(info.get("opener"))
+            # берём кнопку, если совпал словарь ИЛИ есть
+            # атрибут открытия модалки (поиск по поведению)
+            if priority >= len(TRIGGER_PRIORITY) and not opener:
                 continue
-            seen_texts.add(text)
-            buttons.append((priority, text, el))
+            key = (
+                text
+                or info.get("target")
+                or href
+                or "<opener>"
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            buttons.append((priority, text or key, el))
         except Exception:
             continue
     buttons.sort(key=lambda x: x[0])
