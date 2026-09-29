@@ -1065,6 +1065,22 @@ async def check_site_v2(
                     else None
                 )
 
+                if form_json and form_json.get("fields"):
+                    _roles = ", ".join(
+                        f"{f.get('role')}:"
+                        f"{round(f.get('confidence') or 0, 2)}"
+                        for f in form_json["fields"]
+                        if f.get("visible")
+                    )
+                    _logger.step(
+                        "form_fields",
+                        f"скор={form_json.get('score')} "
+                        f"источник={form_json.get('source')} "
+                        f"уверенность="
+                        f"{heuristic_confident(form_json)}",
+                        roles=_roles,
+                    )
+
                 if form_json:
                     _confident = heuristic_confident(
                         form_json
