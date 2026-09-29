@@ -32,7 +32,9 @@ from db import (
 from ai_provider import (
     ask_ai_sync, collect_full_html,
 )
-from form_finder import extract_forms, build_smart_plan
+from form_finder import (
+    extract_forms, build_smart_plan, heuristic_confident,
+)
 from form_filler import (
     execute_action_plan, submit_with_retry,
     fill_all_empty_fields, submit_attempted_var,
@@ -1064,6 +1066,15 @@ async def check_site_v2(
                 )
 
                 if form_json:
+                    _confident = heuristic_confident(
+                        form_json
+                    )
+                    if not _confident and ai_key:
+                        _logger.step(
+                            "smart_plan",
+                            "эвристика не уверена — сначала "
+                            "AI, smart пропускаем",
+                        )
                     _logger.step(
                         "smart_plan",
                         "строим эвристику",
@@ -1072,7 +1083,8 @@ async def check_site_v2(
                         form_json
                     )
                     if (
-                        instructions
+                        (_confident or not ai_key)
+                        and instructions
                         and instructions.get("actions")
                     ):
                         sub, fill_res = (

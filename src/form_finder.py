@@ -1350,6 +1350,29 @@ async def extract_forms(
                  "ни по кнопкам, ни в iframe")
     return None, FormContext(html="", source="none")
 
+def heuristic_confident(form_json: dict) -> bool:
+    """Уверена ли эвристика в разметке формы (гейт перед AI).
+    Не уверена -> имеет смысл сначала спросить AI."""
+    if not form_json:
+        return False
+    fields = form_json.get("fields") or []
+    if not any(f.get("role") == "phone" for f in fields):
+        return False
+    if not form_json.get("submit_selector"):
+        return False
+    if (form_json.get("score") or 0) < 30:
+        return False
+    for f in fields:
+        if not f.get("visible") or not f.get("required"):
+            continue
+        role = f.get("role")
+        if role == "text_unknown":
+            return False
+        if (f.get("confidence") or 0) < 0.5:
+            return False
+    return True
+
+
 def build_smart_plan(form_json: dict) -> dict:
     if not form_json or not form_json.get("fields"):
         return {
