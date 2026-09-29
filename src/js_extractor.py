@@ -3,6 +3,10 @@ from typing import Optional
 from logger import get_logger
 
 FORM_EXTRACTOR_JS = r"""() => {
+    // граница слова для кириллицы: JS \b с кириллицей не работает
+    const _CB = '(?<![а-яёa-z0-9_])';
+    const _CE = '(?![а-яёa-z0-9_])';
+
     function isVisible(el) {
         if (!el) return false;
         const st = getComputedStyle(el);
@@ -120,7 +124,9 @@ FORM_EXTRACTOR_JS = r"""() => {
         phone: [
             /\bphone\b/i, /\btel(?:ephone)?\b/i,
             /\bmobile\b/i, /\bcell\b/i,
-            /телефон/i, /\bтел\b/i, /моб/i,
+            /телефон/i,
+            /(?<![а-яёa-z0-9_])тел(?![а-яёa-z0-9_])/i,
+            /моб/i,
             /phonemask/i, /tildaspec-phone/i,
             /номер.{0,3}тел/i,
         ],
@@ -129,7 +135,8 @@ FORM_EXTRACTOR_JS = r"""() => {
         ],
         firstname: [
             /first.?name/i, /given.?name/i,
-            /^имя$/i, /\bимя\b/i,
+            /^имя$/i,
+            /(?<![а-яёa-z0-9_])имя(?![а-яёa-z0-9_])/i,
         ],
         lastname: [
             /last.?name/i, /surname/i, /family.?name/i,
@@ -139,9 +146,11 @@ FORM_EXTRACTOR_JS = r"""() => {
             /patronymic/i, /middle.?name/i, /отчеств/i,
         ],
         name: [
-            /\bname\b/i, /\bfio\b/i, /\bфио\b/i,
+            /\bname\b/i, /\bfio\b/i,
+            /(?<![а-яёa-z0-9_])фио(?![а-яёa-z0-9_])/i,
             /ваше.?имя/i, /full.?name/i, /полное.?имя/i,
-            /\bимя\b/i, /\bимени/i,
+            /(?<![а-яёa-z0-9_])имя(?![а-яёa-z0-9_])/i,
+            /(?<![а-яёa-z0-9_])имени/i,
         ],
         comment: [
             /comment/i, /message/i, /текст/i,
@@ -209,10 +218,12 @@ FORM_EXTRACTOR_JS = r"""() => {
         bag = bag.toLowerCase();
         const isLogin = /user|login|nick|pass|логин|псевдоним/.test(bag);
         if (/mail|почт|email/.test(bag)) return 'email';
-        if (/тел|phon|\btel|mobil|\bмоб|gsm|whats|viber/.test(bag))
+        if (/тел|phon|\btel|mobil|(?<![а-яёa-z0-9_])моб|gsm|whats|viber/
+            .test(bag))
             return 'phone';
         if (/fam|фами|surname|lastname/.test(bag)) return 'lastname';
-        if (/first.?name|given.?name|\bимя\b|имен/.test(bag))
+        if (/first.?name|given.?name|(?<![а-яёa-z0-9_])имя(?![а-яёa-z0-9_])|имен/
+            .test(bag))
             return 'firstname';
         if (!isLogin
             && /fio|фио|nam|klient|client|zovut|зовут/.test(bag))
@@ -825,8 +836,13 @@ FORM_EXTRACTOR_JS = r"""() => {
                 (el.getAttribute('data-tilda-rule') || ''),
                 (el.getAttribute('data-tilda-fieldname') || ''),
             ].join(' ').toLowerCase();
-            fld.name_hint = /\bимя\b|\bимени\b|\bname\b|\bфио\b|\bфамили|как вас зовут|как к вам обращаться|ваше имя/
-                .test(_nameBag);
+            fld.name_hint = new RegExp(
+                _CB + 'имя' + _CE + '|' + _CB + 'имени' + _CE
+                + '|\\bname\\b|' + _CB + 'фио' + _CE
+                + '|' + _CB + 'фамили'
+                + '|как вас зовут|как к вам обращаться'
+                + '|ваше имя', 'i'
+            ).test(_nameBag);
             fld.tilda_input = (
                 el.hasAttribute('data-tilda-rule')
                 || el.hasAttribute('data-tilda-req')
@@ -1038,7 +1054,12 @@ FORM_EXTRACTOR_JS = r"""() => {
         }
     }
 
-    const ctaRe = /заказать звонок|перезвон|callback|записаться|\bзапись\b|оставить заявк|\bзаявк|консультац/i;
+    const ctaRe = new RegExp(
+        'заказать звонок|перезвон|callback|записаться'
+        + '|' + _CB + 'запись' + _CE
+        + '|оставить заявк|' + _CB + 'заявк'
+        + '|консультац', 'i'
+    );
     for (const form of document.querySelectorAll('form')) {
         if (isSearchForm(form)) continue;
         const sub = findSubmit(form);
