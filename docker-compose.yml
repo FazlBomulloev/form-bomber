@@ -4,6 +4,10 @@ services:
     image: form-bomber:latest
     container_name: form-bomber
     restart: unless-stopped
+    # больше /dev/shm — Chromium реже роняет рендерер (Target crashed)
+    shm_size: "2gb"
+    # правильная жатва зомби-процессов Chromium
+    init: true
     ports:
       # хост:контейнер — наружу отдаём тот же 8002
       - "8002:8002"
