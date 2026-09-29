@@ -1,10 +1,15 @@
 import asyncio
+import contextvars
 import re
 import time
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 from config import PHONE_FALLBACKS
+
+submit_attempted_var = contextvars.ContextVar(
+    "submit_attempted", default=False,
+)
 from logger import get_logger
 from browser_utils import (
     find_el, react_patch_input, smart_click,
@@ -1765,6 +1770,7 @@ async def execute_action_plan(
 
 async def do_submit(page, submit_sel, form_el=None):
     log = get_logger()
+    submit_attempted_var.set(True)
     if form_el:
         try:
             await collect_form_fields(page, form_el)

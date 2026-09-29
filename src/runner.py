@@ -35,7 +35,7 @@ from ai_provider import (
 from form_finder import extract_forms, build_smart_plan
 from form_filler import (
     execute_action_plan, submit_with_retry,
-    fill_all_empty_fields,
+    fill_all_empty_fields, submit_attempted_var,
 )
 from captcha import handle_captcha, detect_captcha_overlay
 from browser_utils import (
@@ -1540,6 +1540,38 @@ async def _process_url_once(
     try:
         if _queue_cancel.is_set():
             return {"url": url, "status": "cancelled"}
+        async def _run(attempt_no):
+            submit_attempted_var.set(False)
+            try:
+                return await check_site_v2(
+                    url,
+                    client["phone"],
+                    client.get("firstname", ""),
+                    client.get("lastname", ""),
+                    client.get("patronymic", ""),
+                    client.get("email", ""),
+                    comment,
+                    ai_key, rucaptcha_key,
+                    attempt_no=attempt_no, max_retries=1,
+                    proxy=proxy,
+                    session_id=sid,
+                    ai_provider=ai_provider,
+                    browser_idx=browser_idx,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                return {
+                    "url": url, "status": "failed",
+                    "method": "crash",
+                    "message": (
+                        f"{type(e).__name__}: {str(e)[:120]}"
+                    ),
+                    "tokens_used": 0,
+                    "reason_code": "crash",
+                    "attempt_no": attempt_no,
+                }
+
         await _ws_broadcast({
             "type": "attempt",
             "url": url,
@@ -1548,32 +1580,29 @@ async def _process_url_once(
             "retrying": False,
         })
         try:
-            result = await check_site_v2(
-                url,
-                client["phone"],
-                client.get("firstname", ""),
-                client.get("lastname", ""),
-                client.get("patronymic", ""),
-                client.get("email", ""),
-                comment,
-                ai_key, rucaptcha_key,
-                attempt_no=1, max_retries=1,
-                proxy=proxy,
-                session_id=sid,
-                ai_provider=ai_provider,
-                browser_idx=browser_idx,
-            )
+            result = await _run(1)
         except asyncio.CancelledError:
             return {"url": url, "status": "cancelled"}
-        except Exception as e:
-            result = {
-                "url": url, "status": "failed",
-                "method": "crash",
-                "message": f"{type(e).__name__}: {str(e)[:120]}",
-                "tokens_used": 0,
-                "reason_code": "crash",
-                "attempt_no": 1,
-            }
+
+        crash = result.get("reason_code") == "crash"
+        submitted = submit_attempted_var.get()
+        if crash and not submitted and not _queue_cancel.is_set():
+            _mark_browser_dead(browser_idx)
+            await asyncio.sleep(1)
+            await _ws_broadcast({
+                "type": "attempt",
+                "url": url,
+                "attempt_no": 2,
+                "max_attempts": 2,
+                "retrying": True,
+            })
+            try:
+                retry = await _run(2)
+            except asyncio.CancelledError:
+                return {"url": url, "status": "cancelled"}
+            if retry.get("reason_code") != "crash":
+                result = retry
+
         await db_add_result(sid, url, result)
         await _ws_broadcast({
             "type": "result",
