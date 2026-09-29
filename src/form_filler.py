@@ -128,8 +128,7 @@ async def _tilda_fill(page, el, value):
 
 def _value_matches(field_name, expected, actual):
     """Проверка, что значение реально проставилось.
-    Для телефона сравниваем цифры, для остальных полей —
-    нормализованное совпадение."""
+    Телефон — по цифрам, остальное — нормализованно."""
     exp = (expected or "").strip()
     act = (actual or "").strip()
     if not exp:
@@ -2757,6 +2756,38 @@ async def _maybe_wpcf7_xhr_fallback(
         )
     return dom_result
 
+async def _check_validity(page, form_el=None):
+    """Список невалидных по HTML5 полей формы (checkValidity)."""
+    try:
+        return await page.evaluate(
+            r"""fe => {
+            const scope = fe || document;
+            const els = scope.querySelectorAll(
+                'input, textarea, select');
+            const bad = [];
+            for (const el of els) {
+                if (el.type === 'hidden'
+                    || el.type === 'submit'
+                    || el.type === 'button'
+                    || el.disabled) continue;
+                if (typeof el.checkValidity !== 'function')
+                    continue;
+                if (!el.checkValidity()) {
+                    bad.push({
+                        name: el.name || '',
+                        type: (el.type || '').toLowerCase(),
+                        msg: el.validationMessage || '',
+                    });
+                }
+            }
+            return bad;
+        }""",
+            form_el,
+        )
+    except Exception:
+        return []
+
+
 async def submit_with_retry(
     page, submit_sel, form_el,
     phone, firstname, lastname,
@@ -2790,6 +2821,30 @@ async def submit_with_retry(
 
     try:
         await _inject_bitrix_sessid(page, form_el)
+    except Exception:
+        pass
+
+    # предпроверка HTML5-валидации до первой отправки: чиним пустые
+    # обязательные и поля с неверным форматом, не тратя сабмит
+    try:
+        invalid = await _check_validity(page, form_el)
+        if invalid:
+            if log:
+                log.step(
+                    "precheck_validity",
+                    f"невалидных до сабмита: {len(invalid)}",
+                )
+            await _check_all_consent_boxes(page, form_el)
+            await fill_all_empty_fields(
+                page, phone, firstname, lastname,
+                patronymic, email, comment, form_el,
+            )
+            hints = await get_invalid_field_hint(page)
+            if hints:
+                await _fix_invalid_fields(
+                    page, hints, phone, firstname,
+                    lastname, patronymic, email, comment,
+                )
     except Exception:
         pass
 
