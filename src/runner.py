@@ -1,5 +1,6 @@
 import asyncio
 import json
+import random
 import re
 import shutil
 import time
@@ -1562,6 +1563,27 @@ async def _ensure_profile_session(
     client["session_id"] = sid
     return sid
 
+# Поле комментария группы может содержать несколько вариантов в формате
+# "1) ...", "2) ..." (каждый с новой строки). Маркер — число со скобкой
+# в начале строки. Вариант может быть многострочным.
+_COMMENT_VARIANT_RE = re.compile(r"(?m)^\s*\d+\)\s*")
+
+
+def _pick_comment(raw: str) -> str:
+    """Возвращает случайный вариант комментария из нумерованного списка.
+
+    Если нумерованных вариантов нет — возвращает текст как есть
+    (обратная совместимость с одиночным комментарием)."""
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    parts = _COMMENT_VARIANT_RE.split(raw)
+    variants = [p.strip() for p in parts if p.strip()]
+    if len(variants) <= 1:
+        return variants[0] if variants else raw
+    return random.choice(variants)
+
+
 async def _process_url_once(
     task: dict, client: dict, sid: str,
     ai_key: str, rucaptcha_key: str,
@@ -1569,7 +1591,7 @@ async def _process_url_once(
     tabs_per_browser: int,
 ) -> dict:
     url = task["url"]
-    comment = task.get("comment", "")
+    comment = _pick_comment(task.get("comment", ""))
     proxy = parse_proxy(client.get("proxy", ""))
     browser_idx = worker_id // max(1, tabs_per_browser)
 

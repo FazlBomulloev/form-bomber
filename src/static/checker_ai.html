@@ -1021,7 +1021,7 @@
             <button class="btn btn-ghost btn-sm" style="padding:2px 6px;font-size:13px;line-height:1" onclick="removeGroup(${i})">&times;</button>
           </div>
           <div><label>Название</label><input type="text" value="${esc(g.name)}" oninput="updateGroup(${i},'name',this.value)"></div>
-          <div><label>Комментарий (уходит в форму)</label><input type="text" value="${esc(g.comment)}" oninput="updateGroup(${i},'comment',this.value)" placeholder="Хочу виниры..."></div>
+          <div><label>Комментарий (уходит в форму) — можно несколько вариантов, скрипт выберет случайный</label><textarea rows="3" oninput="updateGroup(${i},'comment',this.value)" placeholder="Хочу виниры...&#10;или несколько вариантов:&#10;1) Хочу записаться на консультацию&#10;2) Подскажите по ценам на виниры&#10;3) Интересует лечение, перезвоните">${esc(g.comment)}</textarea></div>
           <div><label>Список сайтов</label><textarea rows="4" oninput="updateGroup(${i},'urls',this.value); renderGroupsCount()" placeholder="https://site1.ru&#10;https://site2.ru">${esc(g.urls)}</textarea></div>
           <div class="file-drop" onclick="document.getElementById('gf-${i}').click()" style="margin-top:4px">
             <input type="file" id="gf-${i}" accept=".txt,.csv" onchange="loadGroupFile(${i}, this)">
