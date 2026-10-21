@@ -371,6 +371,29 @@ def _slot_needs_recycle(slot: dict) -> bool:
     return False
 
 async def _reset_browsers():
+    async with _browser_lock:
+        await _reset_pw_locked()
+
+_DRIVER_DEAD_MARKERS = (
+    "WriteUnixTransport",
+    "handler is closed",
+    "Connection closed",
+    "Transport closed",
+    "has been closed",
+    "Event loop is closed",
+    "Target page, context or browser has been closed",
+    "Browser closed",
+    "browser has disconnected",
+)
+
+
+def _is_driver_dead(exc: Exception) -> bool:
+    msg = str(exc)
+    return any(m in msg for m in _DRIVER_DEAD_MARKERS)
+
+
+async def _reset_pw_locked():
+    """Полный сброс драйвера Playwright. Вызывать под _browser_lock."""
     global _browsers, _pw
     for s in list(_browsers):
         try:
@@ -384,6 +407,7 @@ async def _reset_browsers():
     except Exception:
         pass
     _pw = None
+
 
 async def _ensure_browsers(count: int = 2):
     global _browsers, _pw
@@ -400,15 +424,26 @@ async def _ensure_browsers(count: int = 2):
         _browsers = alive
         if len(_browsers) >= count:
             return [s["browser"] for s in _browsers[:count]]
-        if _pw is None:
-            _pw = await async_playwright().start()
-        while len(_browsers) < count:
-            br = await _pw.chromium.launch(
-                headless=True,
-                args=_CHROMIUM_ARGS,
-            )
-            _browsers.append(_make_slot(br))
-        return [s["browser"] for s in _browsers[:count]]
+
+        last_err = None
+        for _attempt in range(3):
+            try:
+                if _pw is None:
+                    _pw = await async_playwright().start()
+                while len(_browsers) < count:
+                    br = await _pw.chromium.launch(
+                        headless=True,
+                        args=_CHROMIUM_ARGS,
+                    )
+                    _browsers.append(_make_slot(br))
+                return [s["browser"] for s in _browsers[:count]]
+            except Exception as e:
+                last_err = e
+                # сломанный драйвер/транспорт — поднимаем Playwright
+                # с нуля, иначе весь прогон будет падать на мёртвом _pw
+                await _reset_pw_locked()
+                await asyncio.sleep(1.0 * (_attempt + 1))
+        raise last_err
 
 async def _get_browser(idx: int = 0):
     browsers = await _ensure_browsers(max(1, idx + 1))
@@ -677,7 +712,7 @@ async def check_site_v2(
         ctx_kwargs = build_stealth_context_kwargs(ctx_kwargs)
         if proxy:
             ctx_kwargs["proxy"] = proxy
-        for _br_try in range(2):
+        for _br_try in range(3):
             try:
                 browser = await _get_browser(browser_idx)
                 ctx = await browser.new_context(
@@ -688,10 +723,15 @@ async def check_site_v2(
                 _active_contexts.add(ctx)
                 page = await ctx.new_page()
                 break
-            except Exception:
-                _mark_browser_dead(browser_idx)
-                await _recycle_browser_if_needed(browser_idx)
-                if _br_try == 1:
+            except Exception as _be:
+                if _is_driver_dead(_be):
+                    # драйвер Playwright мёртв — поднимаем с нуля,
+                    # иначе все последующие сайты упадут так же
+                    await _reset_browsers()
+                else:
+                    _mark_browser_dead(browser_idx)
+                    await _recycle_browser_if_needed(browser_idx)
+                if _br_try == 2:
                     raise
                 _logger.warn("браузер упал, перезапуск")
                 await asyncio.sleep(1)

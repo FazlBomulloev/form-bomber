@@ -163,20 +163,20 @@ class SiteLogger:
             error=error,
         )
 
-    def log_captcha(self, action: str, **kw):
+    def log_captcha(self, stage: str, **kw):
         t = self._t()
         kv = "  ".join(
             f"{k}={str(v)[:80]}" for k, v in kw.items()
         )
         self._w(
             self._runlog,
-            f"[{t:7.2f}s] 🔑 captcha[{action}] "
+            f"[{t:7.2f}s] 🔑 captcha[{stage}] "
             f"{kv}\n",
         )
-        self._ev(
-            "captcha", action=action,
-            **{k: str(v)[:80] for k, v in kw.items()},
-        )
+        ev = {k: str(v)[:80] for k, v in kw.items()}
+        ev["stage"] = stage
+        ev.setdefault("action", stage)
+        self._ev("captcha", **ev)
 
     def log_action(
         self, action: str, selector: str = "",
